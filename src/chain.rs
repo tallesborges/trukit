@@ -8,10 +8,14 @@ use multihash_codetable::{Code, MultihashDigest};
 use rand::RngCore;
 use scale_info::PortableRegistry;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use subxt::metadata::ArcMetadata;
+use subxt::config::RpcConfigFor;
+use subxt::ext::codec::{Decode, Encode};
+use subxt::metadata::{ArcMetadata, Metadata};
+use subxt::rpcs::{LegacyRpcMethods, RpcClient};
 use subxt::utils::{AccountId32, H160};
 use subxt::{OnlineClient, PolkadotConfig};
 use subxt_signer::{sr25519::Keypair, SecretUri};
@@ -22,6 +26,11 @@ use subxt_signer::{sr25519::Keypair, SecretUri};
 /// default trait methods are no-ops, so a bespoke `Config` re-downloads metadata
 /// on *every* `at_current_block`/`tx`/`wait_for_success` call; wiring this cache
 /// in makes a reused client download each runtime's metadata exactly once.
+///
+/// Because every `trikit` invocation is a fresh process, this in-memory cache is
+/// additionally *pre-seeded* from the persistent on-disk cache (see
+/// [`load_cached_metadata`]) before the client is built, so an unchanged runtime
+/// spec version is served entirely from disk with no metadata download at all.
 #[derive(Debug, Clone, Default)]
 struct MetadataCache(Arc<RwLock<HashMap<u32, ArcMetadata>>>);
 
@@ -33,6 +42,150 @@ impl MetadataCache {
     fn set(&self, spec_version: u32, metadata: ArcMetadata) {
         self.0.write().unwrap().insert(spec_version, metadata);
     }
+}
+
+/// Directory for the cross-run runtime-metadata cache. Honors `TRIKIT_CACHE_DIR`,
+/// then `XDG_CACHE_HOME`, then `~/.cache`, filing metadata under `trikit/metadata`.
+/// Returns `None` when no location can be resolved — metadata is then fetched
+/// fresh every run (still correct, just not cached).
+fn metadata_cache_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("TRIKIT_CACHE_DIR").filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    if let Some(dir) = std::env::var_os("XDG_CACHE_HOME").filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(dir).join("trikit").join("metadata"));
+    }
+    let home = std::env::var_os("HOME").filter(|d| !d.is_empty())?;
+    Some(PathBuf::from(home).join(".cache").join("trikit").join("metadata"))
+}
+
+/// Filesystem-safe token identifying a chain endpoint (scheme stripped, every
+/// non-alphanumeric byte mapped to `_`), so cached metadata for different
+/// RPCs/envs never collides even when two chains happen to share a spec version.
+fn cache_namespace(rpc_url: &str) -> String {
+    let host = rpc_url.split_once("://").map_or(rpc_url, |(_, rest)| rest);
+    host.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+/// On-disk path for a chain's metadata at a given spec version, or `None` when no
+/// cache directory can be resolved.
+fn metadata_cache_path(namespace: &str, spec_version: u32) -> Option<PathBuf> {
+    Some(metadata_cache_dir()?.join(format!("{namespace}-v{spec_version}.scale")))
+}
+
+/// Fetch the raw `RuntimeMetadataPrefixed` SCALE bytes from the chain, mirroring
+/// subxt's own selection: the newest non-unstable version via the
+/// `Metadata_metadata_at_version` runtime API, falling back to the legacy
+/// `Metadata_metadata`. The bytes are exactly what [`Metadata::decode_from`] (and
+/// subxt internally) expect, so they can be persisted and reloaded verbatim —
+/// crucially they include runtime-API descriptors (needed by `ReviveApi.*`),
+/// unlike the trimmed-down `state_getMetadata` output.
+async fn fetch_metadata_bytes<C: subxt::Config>(
+    methods: &LegacyRpcMethods<RpcConfigFor<C>>,
+) -> Result<Vec<u8>> {
+    let latest_version = methods
+        .state_call("Metadata_metadata_versions", None, None)
+        .await
+        .ok()
+        .and_then(|res| <Vec<u32>>::decode(&mut &res[..]).ok())
+        .and_then(|versions| versions.into_iter().filter(|v| *v != u32::MAX).max());
+
+    if let Some(version) = latest_version {
+        let params = version.encode();
+        let resp = methods
+            .state_call("Metadata_metadata_at_version", Some(params.as_slice()), None)
+            .await
+            .context("Metadata_metadata_at_version runtime call")?;
+        // `Option<OpaqueMetadata>`; `OpaqueMetadata` encodes as a length-prefixed
+        // byte blob, so decoding as `Option<Vec<u8>>` yields the inner
+        // `RuntimeMetadataPrefixed` bytes directly.
+        let bytes = <Option<Vec<u8>>>::decode(&mut &resp[..])
+            .context("decoding Metadata_metadata_at_version response")?
+            .context("chain returned no metadata for its latest metadata version")?;
+        return Ok(bytes);
+    }
+
+    let resp = methods
+        .state_call("Metadata_metadata", None, None)
+        .await
+        .context("Metadata_metadata runtime call")?;
+    let bytes = <Vec<u8>>::decode(&mut &resp[..]).context("decoding Metadata_metadata response")?;
+    Ok(bytes)
+}
+
+/// Download the chain's metadata bytes, decode them, and (best-effort) persist
+/// them to `path` for reuse on the next run. A failed cache write never fails the
+/// command.
+async fn fetch_and_cache<C: subxt::Config>(
+    methods: &LegacyRpcMethods<RpcConfigFor<C>>,
+    path: Option<&Path>,
+) -> Result<Metadata> {
+    let bytes = fetch_metadata_bytes::<C>(methods).await?;
+    let metadata =
+        Metadata::decode_from(&bytes).context("decoding runtime metadata fetched from chain")?;
+    if let Some(path) = path {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, &bytes);
+    }
+    Ok(metadata)
+}
+
+/// Resolve the runtime metadata for the chain reachable at `rpc`, preferring the
+/// persistent on-disk copy keyed by `(endpoint, spec_version)` and only paying
+/// for the (large) metadata download when the spec version isn't cached yet —
+/// i.e. on first use or after a runtime upgrade. Keying by spec version keeps
+/// this correct across upgrades: a bumped runtime is a cache miss and refetches.
+/// The returned [`MetadataCache`] is pre-seeded so the subsequent client performs
+/// no metadata download of its own.
+async fn load_cached_metadata<C: subxt::Config>(
+    rpc: &RpcClient,
+    rpc_url: &str,
+) -> Result<MetadataCache> {
+    let methods = LegacyRpcMethods::<RpcConfigFor<C>>::new(rpc.clone());
+    let spec_version = methods
+        .state_get_runtime_version(None)
+        .await
+        .context("fetching runtime spec version")?
+        .spec_version;
+
+    let path = metadata_cache_path(&cache_namespace(rpc_url), spec_version);
+
+    let metadata = match path.as_deref().and_then(|p| std::fs::read(p).ok()) {
+        // A cached blob that no longer decodes (corrupt/partial) is ignored and refetched.
+        Some(bytes) => match Metadata::decode_from(&bytes) {
+            Ok(metadata) => metadata,
+            Err(_) => fetch_and_cache::<C>(&methods, path.as_deref()).await?,
+        },
+        None => fetch_and_cache::<C>(&methods, path.as_deref()).await?,
+    };
+
+    let cache = MetadataCache::default();
+    cache.set(spec_version, metadata.arc());
+    Ok(cache)
+}
+
+/// Connect to `rpc_url` and build an [`OnlineClient`] whose config is pre-seeded
+/// with the chain's runtime metadata from the persistent cache. A single RPC
+/// connection is reused for the spec-version probe, any metadata fetch, and the
+/// client itself.
+async fn connect_with_cache<C, F>(rpc_url: &str, make_config: F) -> Result<OnlineClient<C>>
+where
+    C: subxt::Config,
+    F: FnOnce(MetadataCache) -> C,
+{
+    let rpc = RpcClient::from_url(rpc_url)
+        .await
+        .with_context(|| format!("connecting to RPC {rpc_url}"))?;
+    let cache = load_cached_metadata::<C>(&rpc, rpc_url)
+        .await
+        .with_context(|| format!("loading runtime metadata from {rpc_url}"))?;
+    OnlineClient::from_rpc_client_with_config(make_config(cache), rpc)
+        .await
+        .with_context(|| format!("connecting to RPC {rpc_url}"))
 }
 
 #[subxt::subxt(runtime_metadata_path = "artifacts/paseo_next_v2_asset_hub.scale")]
@@ -333,14 +486,12 @@ fn store_params(nonce: u64) -> StoreParams {
 }
 
 async fn connect_bulletin(rpc_url: &str) -> Result<OnlineClient<BulletinConfig>> {
-    OnlineClient::<BulletinConfig>::from_url(rpc_url)
-        .await
-        .with_context(|| format!("connecting to Bulletin RPC {rpc_url}"))
+    connect_with_cache(rpc_url, |metadata_cache| BulletinConfig { metadata_cache }).await
 }
 
-/// Open a Bulletin client using the bespoke [`BulletinConfig`]. Reuse a single
-/// client per command so each runtime's metadata is downloaded once and then
-/// served from the client's [`MetadataCache`] on subsequent block accesses.
+/// Open a Bulletin client using the bespoke [`BulletinConfig`]. The client's
+/// metadata cache is pre-seeded from the persistent on-disk cache, so an
+/// unchanged runtime is served from disk with no metadata download.
 pub async fn bulletin_client(env: &Env) -> Result<OnlineClient<BulletinConfig>> {
     connect_bulletin(env.bulletin_rpc).await
 }
@@ -641,19 +792,20 @@ pub async fn store_block(
     Ok(StoreOutcome::Stored { block, index })
 }
 
-/// Build an sr25519 signer from a mnemonic (+ optional Substrate derivation path).
-/// When no mnemonic is supplied, fall back to the `//Alice` dev key so the demo
-/// works out of the box. The mnemonic is never logged.
+/// Standard Substrate dev phrase. Its bare-master account (empty derivation) is
+/// the dev-mode DotNS owner used by `bulletin-deploy` / `playground-cli`; its
+/// `//deploy/N` derivations are the authorized Bulletin pool.
+pub const DEV_PHRASE: &str = "bottom drive obey lake curtain smoke basket hold race lonely fit walk";
+
+/// Build an sr25519 signer from a mnemonic (+ optional derivation path). Defaults
+/// to the bare-master dev account so `trikit` owns the same dev-mode names
+/// `bulletin-deploy` / `playground-cli` register. Never logs the mnemonic.
 pub fn build_signer(mnemonic: Option<&str>, derivation_path: Option<&str>) -> Result<Keypair> {
-    match mnemonic {
-        Some(phrase) => {
-            let suffix = derivation_path.unwrap_or("");
-            let uri = SecretUri::from_str(&format!("{phrase}{suffix}"))
-                .context("failed to parse mnemonic + derivation path")?;
-            Keypair::from_uri(&uri).context("failed to derive sr25519 keypair")
-        }
-        None => Ok(subxt_signer::sr25519::dev::alice()),
-    }
+    let phrase = mnemonic.unwrap_or(DEV_PHRASE);
+    let suffix = derivation_path.unwrap_or("");
+    let uri = SecretUri::from_str(&format!("{phrase}{suffix}"))
+        .context("failed to parse mnemonic + derivation path")?;
+    Keypair::from_uri(&uri).context("failed to derive sr25519 keypair")
 }
 
 pub fn account_id(signer: &Keypair) -> AccountId32 {
@@ -723,11 +875,13 @@ pub async fn resolve_contenthash(
 }
 
 /// Open an Asset Hub client using the bespoke [`AssetHubConfig`] so signed
-/// extrinsics carry the full 17-extension payload the runtime expects.
+/// extrinsics carry the full 17-extension payload the runtime expects. The
+/// client's metadata cache is pre-seeded from the persistent on-disk cache.
 pub async fn asset_hub_client(env: &Env) -> Result<OnlineClient<AssetHubConfig>> {
-    OnlineClient::<AssetHubConfig>::from_url(env.asset_hub_rpc)
-        .await
-        .with_context(|| format!("connecting to Asset Hub RPC {}", env.asset_hub_rpc))
+    connect_with_cache(env.asset_hub_rpc, |metadata_cache| AssetHubConfig {
+        metadata_cache,
+    })
+    .await
 }
 
 /// Ensure the signer's account has an H160 mapping in `Revive.OriginalAccount`.

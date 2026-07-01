@@ -41,8 +41,8 @@ pub async fn run(
     };
 
     println!("content  {content_cid}");
-    println!("uploading blocks to Bulletin (pool signer //deploy/0)...");
-    let pool = bulletin::pool_signer()?;
+    let (pool, pool_index) = bulletin::pool_signer()?;
+    println!("uploading blocks to Bulletin (pool signer //deploy/{pool_index})...");
     let bulletin = chain::bulletin_client(env).await?;
     let stored = bulletin::store_car_file(env, &bulletin, &car_path, &pool).await?;
     if stored.root != content_cid {

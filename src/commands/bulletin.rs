@@ -1,4 +1,4 @@
-use crate::chain::{self, bulletin, BulletinConfig};
+use crate::chain::{self, bulletin, BulletinConfig, DEV_PHRASE};
 use crate::env::Env;
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
@@ -8,10 +8,6 @@ use std::str::FromStr;
 use subxt::utils::AccountId32;
 use subxt::OnlineClient;
 use subxt_signer::sr25519::Keypair;
-
-/// Standard Substrate dev phrase. Its `//deploy/0` derivation is authorized to
-/// write to the paseo-next-v2 Bulletin chain, so it's the default signer here.
-const DEV_PHRASE: &str = "bottom drive obey lake curtain smoke basket hold race lonely fit walk";
 
 /// Chain-enforced `MaxTransactionSize` (2 MiB).
 const MAX_TRANSACTION_SIZE: usize = 2 * 1024 * 1024;
@@ -49,22 +45,23 @@ pub async fn run(
     }
 }
 
-/// Resolve the write signer: the caller's mnemonic when supplied, otherwise the
-/// authorized dev-phrase `//deploy/0` account (dev Alice has no Bulletin quota).
+/// Resolve the write signer: the caller's mnemonic when supplied, otherwise a
+/// random authorized `//deploy/N` pool account (the default owner signer has no
+/// Bulletin quota — only the pool accounts do).
 fn resolve_signer(mnemonic: Option<String>, derivation_path: Option<String>) -> Result<Keypair> {
     match mnemonic {
         Some(phrase) => chain::build_signer(Some(&phrase), derivation_path.as_deref()),
-        None => pool_signer(),
+        None => pool_signer().map(|(signer, _)| signer),
     }
 }
 
-/// The Bulletin-authorized pool signer. Picks a random `//deploy/N` (N in 0..=9,
-/// all authorized) to spread load across the shared pool accounts and reduce
-/// nonce contention with concurrent deploys. `deploy` uses this to store blocks
-/// regardless of the domain-owner mnemonic.
-pub fn pool_signer() -> Result<Keypair> {
-    let n = rand::thread_rng().gen_range(0..=9);
-    chain::build_signer(Some(DEV_PHRASE), Some(&format!("//deploy/{n}")))
+/// A random authorized `//deploy/N` (N in 0..=9) Bulletin pool account, spreading
+/// load and cutting nonce contention across concurrent deploys. Returns the index
+/// too so callers can report which pool account they used.
+pub fn pool_signer() -> Result<(Keypair, u32)> {
+    let n = rand::thread_rng().gen_range(0u32..=9);
+    let signer = chain::build_signer(Some(DEV_PHRASE), Some(&format!("//deploy/{n}")))?;
+    Ok((signer, n))
 }
 
 async fn status(
@@ -79,9 +76,7 @@ async fn status(
         None => chain::account_id(&resolve_signer(mnemonic, derivation_path)?),
     };
 
-    let client = OnlineClient::<BulletinConfig>::from_url(env.bulletin_rpc)
-        .await
-        .with_context(|| format!("connecting to Bulletin RPC {}", env.bulletin_rpc))?;
+    let client = chain::bulletin_client(env).await?;
 
     let scope = bulletin::runtime_types::pallet_bulletin_transaction_storage::types::AuthorizationScope::Account(account.clone());
     let address = bulletin::storage().transaction_storage().authorizations();
@@ -128,9 +123,7 @@ async fn store(
     let cid = chain::raw_cid(&data);
     let gateway_url = format!("{}/ipfs/{cid}", env.ipfs_gateway);
 
-    let client = OnlineClient::<BulletinConfig>::from_url(env.bulletin_rpc)
-        .await
-        .with_context(|| format!("connecting to Bulletin RPC {}", env.bulletin_rpc))?;
+    let client = chain::bulletin_client(env).await?;
     let signer = resolve_signer(mnemonic, derivation_path)?;
 
     match chain::store_block(&client, &signer, 0x55, &data).await? {

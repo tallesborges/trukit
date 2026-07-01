@@ -15,7 +15,7 @@ struct Cli {
     #[arg(long, global = true, default_value = "paseo-next-v2")]
     env: String,
 
-    /// Signer mnemonic (falls back to $MNEMONIC then $DOTNS_MNEMONIC; defaults to //Alice dev key).
+    /// Signer mnemonic (falls back to $MNEMONIC then $DOTNS_MNEMONIC; defaults to the bare-master dev account used by bulletin-deploy/playground dev mode).
     #[arg(long, global = true)]
     mnemonic: Option<String>,
 
