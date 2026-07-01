@@ -52,8 +52,14 @@ pub async fn run(
 fn resolve_signer(mnemonic: Option<String>, derivation_path: Option<String>) -> Result<Keypair> {
     match mnemonic {
         Some(phrase) => chain::build_signer(Some(&phrase), derivation_path.as_deref()),
-        None => chain::build_signer(Some(DEV_PHRASE), Some("//deploy/0")),
+        None => pool_signer(),
     }
+}
+
+/// The Bulletin-authorized pool signer (dev-phrase `//deploy/0`). `deploy` uses
+/// this to store blocks regardless of the domain-owner mnemonic.
+pub fn pool_signer() -> Result<Keypair> {
+    chain::build_signer(Some(DEV_PHRASE), Some("//deploy/0"))
 }
 
 async fn status(
@@ -135,16 +141,18 @@ async fn store(
     Ok(())
 }
 
+/// Summary of storing a CAR's blocks on the Bulletin chain.
+pub struct CarStored {
+    pub root: cid::Cid,
+    pub stored: usize,
+    pub skipped: usize,
+}
+
 /// Store every IPLD block of a CARv1 individually (each keyed by its own content
 /// hash) so the CAR's root DAG resolves on the IPFS gateway. Kubo chunks files
 /// into ≤256 KiB blocks, so every block fits a single ≤2 MiB extrinsic.
-async fn store_car(
-    env: &Env,
-    path: String,
-    mnemonic: Option<String>,
-    derivation_path: Option<String>,
-) -> Result<()> {
-    let file = tokio::fs::File::open(&path)
+pub async fn store_car_file(env: &Env, path: &str, signer: &Keypair) -> Result<CarStored> {
+    let file = tokio::fs::File::open(path)
         .await
         .with_context(|| format!("opening CAR file {path}"))?;
     let mut car = iroh_car::CarReader::new(tokio::io::BufReader::new(file))
@@ -160,7 +168,6 @@ async fn store_car(
     let client = OnlineClient::<BulletinConfig>::from_url(env.bulletin_rpc)
         .await
         .with_context(|| format!("connecting to Bulletin RPC {}", env.bulletin_rpc))?;
-    let signer = resolve_signer(mnemonic, derivation_path)?;
 
     let mut stored = 0usize;
     let mut skipped = 0usize;
@@ -182,16 +189,35 @@ async fn store_car(
             );
         }
 
-        match chain::store_block(&client, &signer, cid.codec(), &data).await? {
+        match chain::store_block(&client, signer, cid.codec(), &data).await? {
             chain::StoreOutcome::Stored { .. } => stored += 1,
             chain::StoreOutcome::AlreadyPresent { .. } => skipped += 1,
         }
     }
 
-    let total = stored + skipped;
-    let gateway_url = format!("{}/ipfs/{root}/", env.ipfs_gateway);
-    println!("root     {root}");
-    println!("blocks   stored={stored} skipped={skipped} total={total}");
+    Ok(CarStored {
+        root,
+        stored,
+        skipped,
+    })
+}
+
+async fn store_car(
+    env: &Env,
+    path: String,
+    mnemonic: Option<String>,
+    derivation_path: Option<String>,
+) -> Result<()> {
+    let signer = resolve_signer(mnemonic, derivation_path)?;
+    let summary = store_car_file(env, &path, &signer).await?;
+
+    let total = summary.stored + summary.skipped;
+    let gateway_url = format!("{}/ipfs/{}/", env.ipfs_gateway, summary.root);
+    println!("root     {}", summary.root);
+    println!(
+        "blocks   stored={} skipped={} total={total}",
+        summary.stored, summary.skipped
+    );
     println!("gateway  {gateway_url}");
     Ok(())
 }

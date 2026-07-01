@@ -1,7 +1,9 @@
 use crate::chain;
 use crate::env::Env;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Subcommand;
+use std::str::FromStr;
+use subxt::utils::AccountId32;
 
 #[derive(Subcommand)]
 pub enum Cmd {
@@ -9,6 +11,15 @@ pub enum Cmd {
     Env,
     /// Derive the signer and prove connectivity to Asset Hub + Bulletin.
     Whoami,
+    /// Ensure the signer has an H160 mapping on Asset Hub (Revive.map_account).
+    Map,
+    /// Send native PAS to an account on Asset Hub (Balances.transfer_keep_alive).
+    Transfer {
+        /// Destination SS58 address.
+        dest: String,
+        /// Amount in plancks (native PAS smallest unit).
+        plancks: u128,
+    },
 }
 
 pub async fn run(
@@ -37,6 +48,28 @@ pub async fn run(
             println!("h160        0x{}", hex::encode(h160.0));
             println!("asset_hub   {}  #{asset_hub_block}", env.asset_hub_rpc);
             println!("bulletin    {}  #{bulletin_block}", env.bulletin_rpc);
+        }
+        Cmd::Map => {
+            let signer = chain::build_signer(mnemonic.as_deref(), derivation_path.as_deref())?;
+            let client = chain::asset_hub_client(env).await?;
+            chain::ensure_mapped(&client, &signer).await?;
+            println!(
+                "account {} is mapped on Asset Hub",
+                chain::account_id(&signer)
+            );
+        }
+        Cmd::Transfer { dest, plancks } => {
+            let signer = chain::build_signer(mnemonic.as_deref(), derivation_path.as_deref())?;
+            let dest = AccountId32::from_str(&dest)
+                .map_err(|e| anyhow::anyhow!("invalid SS58 dest address: {e}"))?;
+            let tx = chain::transfer_keep_alive(env, &signer, dest, plancks)
+                .await
+                .context("transfer failed")?;
+            println!(
+                "transferred {plancks} plancks {} -> {dest} (tx 0x{})",
+                chain::account_id(&signer),
+                hex::encode(tx)
+            );
         }
     }
     Ok(())

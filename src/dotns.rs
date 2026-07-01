@@ -5,6 +5,7 @@ use cid::Cid;
 
 sol! {
     function contenthash(bytes32 node) external view returns (bytes);
+    function setContenthash(bytes32 node, bytes hash) external;
 }
 
 /// EIP-137 ENS namehash of a (already normalized) dotted name.
@@ -33,6 +34,22 @@ pub fn decode_contenthash_return(data: &[u8]) -> Result<Vec<u8>> {
     let bytes = contenthashCall::abi_decode_returns(data)
         .context("ABI-decoding contenthash return failed")?;
     Ok(bytes.to_vec())
+}
+
+/// Encode a CIDv1 as an EIP-1577 IPFS contenthash: `0xe301` ++ raw CID bytes.
+pub fn cid_to_contenthash(cid: &Cid) -> Vec<u8> {
+    let mut out = vec![0xe3, 0x01];
+    out.extend_from_slice(&cid.to_bytes());
+    out
+}
+
+/// ABI-encode a `setContenthash(bytes32 node, bytes hash)` resolver call.
+pub fn encode_set_contenthash_call(node: [u8; 32], contenthash: &[u8]) -> Vec<u8> {
+    setContenthashCall {
+        node: node.into(),
+        hash: contenthash.to_vec().into(),
+    }
+    .abi_encode()
 }
 
 /// Decode an EIP-1577 IPFS contenthash into its CIDv1 (base32) string.
@@ -88,5 +105,14 @@ mod tests {
     fn normalize_appends_dot() {
         assert_eq!(normalize_name("host-playground"), "host-playground.dot");
         assert_eq!(normalize_name("HOST-Playground.DOT"), "host-playground.dot");
+    }
+
+    #[test]
+    fn contenthash_round_trips_cid() {
+        let cid =
+            Cid::try_from("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
+        let contenthash = cid_to_contenthash(&cid);
+        assert_eq!(&contenthash[..2], &[0xe3, 0x01]);
+        assert_eq!(contenthash_to_cid(&contenthash).unwrap(), cid.to_string());
     }
 }

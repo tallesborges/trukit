@@ -49,11 +49,23 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let env = env::Env::resolve(&cli.env)?;
     match cli.command {
-        Command::Deploy(args) => commands::deploy::run(&env, args),
+        Command::Deploy(args) => {
+            let mnemonic = cli
+                .mnemonic
+                .or_else(|| std::env::var("MNEMONIC").ok())
+                .or_else(|| std::env::var("DOTNS_MNEMONIC").ok());
+            commands::deploy::run(&env, args, mnemonic, cli.derivation_path).await
+        }
         Command::Bulletin(cmd) => {
             commands::bulletin::run(&env, cmd, cli.mnemonic, cli.derivation_path).await
         }
-        Command::Name(cmd) => commands::name::run(&env, cmd).await,
+        Command::Name(cmd) => {
+            let mnemonic = cli
+                .mnemonic
+                .or_else(|| std::env::var("MNEMONIC").ok())
+                .or_else(|| std::env::var("DOTNS_MNEMONIC").ok());
+            commands::name::run(&env, cmd, mnemonic, cli.derivation_path).await
+        }
         Command::Statement(cmd) => commands::statement::run(&env, cmd),
         Command::Account(cmd) => {
             let mnemonic = cli
