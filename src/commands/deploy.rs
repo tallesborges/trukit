@@ -151,7 +151,7 @@ struct TempCar(std::path::PathBuf);
 
 impl TempCar {
     fn for_cid(cid: &Cid) -> Self {
-        TempCar(std::env::temp_dir().join(format!("trikit-deploy-{cid}.car")))
+        TempCar(std::env::temp_dir().join(format!("trukit-deploy-{cid}.car")))
     }
 
     fn path(&self) -> &str {

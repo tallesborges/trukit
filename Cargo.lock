@@ -4510,7 +4510,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "trikit"
+name = "trukit"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",

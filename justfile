@@ -1,4 +1,4 @@
-# trikit — a CLI for the Triangle/Trinity ecosystem (Bulletin · DotNS · People)
+# trukit — a CLI for the Triangle/Trinity ecosystem (Bulletin · DotNS · People)
 # Run `just` (or `just --list`) to see all recipes.
 
 # The well-known Substrate dev phrase (PUBLIC — not a secret). Its //Alice,
@@ -47,37 +47,37 @@ run *args:
 
 # Signer identity: SS58 + H160 mapping (defaults to dev //Alice)
 whoami:
-    trikit account whoami
+    trukit account whoami
 
 # Resolved environment config
 env:
-    trikit account env
+    trukit account env
 
 # Resolve a .dot name to its content CID, e.g. `just resolve host-playground.dot`
 resolve name:
-    trikit name resolve {{name}}
+    trukit name resolve {{name}}
 
 # Bulletin upload quota for the (random) pool signer
 status:
-    trikit bulletin status
+    trukit bulletin status
 
 # ── Signed shortcuts (testnet dev accounts) ──────────────────────────────────
 
 # Deploy a folder to a domain you own. Usage: `just deploy ./dist myname.dot [//Alice]`
 deploy dir domain path="//Alice":
-    MNEMONIC="{{dev_phrase}}" trikit deploy {{dir}} {{domain}} --derivation-path {{path}}
+    MNEMONIC="{{dev_phrase}}" trukit deploy {{dir}} {{domain}} --derivation-path {{path}}
 
 # Register an open-tier name to a dev account. Usage: `just register myname.dot [//Alice]`
 register name path="//Alice":
-    MNEMONIC="{{dev_phrase}}" trikit name register {{name}} --derivation-path {{path}}
+    MNEMONIC="{{dev_phrase}}" trukit name register {{name}} --derivation-path {{path}}
 
 # Point an owned name at an existing CID. Usage: `just set myname.dot <cid> [//Alice]`
 set name cid path="//Alice":
-    MNEMONIC="{{dev_phrase}}" trikit name content set {{name}} {{cid}} --derivation-path {{path}}
+    MNEMONIC="{{dev_phrase}}" trukit name content set {{name}} {{cid}} --derivation-path {{path}}
 
 # Store a single file on Bulletin. Usage: `just store ./file.bin`
 store file:
-    trikit bulletin store {{file}}
+    trukit bulletin store {{file}}
 
 # ── Maintenance ──────────────────────────────────────────────────────────────
 
