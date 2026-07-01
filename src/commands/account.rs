@@ -39,8 +39,8 @@ pub async fn run(
         Cmd::Whoami => {
             let signer = chain::build_signer(mnemonic.as_deref(), derivation_path.as_deref())?;
             let account = chain::account_id(&signer);
-            let asset_hub = chain::asset_hub_client(env).await?;
-            let bulletin = chain::bulletin_client(env).await?;
+            let (asset_hub, bulletin) =
+                tokio::try_join!(chain::asset_hub_client(env), chain::bulletin_client(env))?;
             let h160 = chain::revive_address(&asset_hub, account.clone()).await?;
             let asset_hub_block = asset_hub.at_current_block().await?.block_number();
             let bulletin_block = bulletin.at_current_block().await?.block_number();
