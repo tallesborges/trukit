@@ -43,7 +43,8 @@ pub async fn run(
     println!("content  {content_cid}");
     println!("uploading blocks to Bulletin (pool signer //deploy/0)...");
     let pool = bulletin::pool_signer()?;
-    let stored = bulletin::store_car_file(env, &car_path, &pool).await?;
+    let bulletin = chain::bulletin_client(env).await?;
+    let stored = bulletin::store_car_file(env, &bulletin, &car_path, &pool).await?;
     if stored.root != content_cid {
         bail!(
             "CAR root {} does not match the merkleized content CID {content_cid}",
@@ -60,8 +61,9 @@ pub async fn run(
 
     println!("binding  {domain} -> {content_cid} (domain-owner mnemonic)...");
     let owner = chain::build_signer(mnemonic.as_deref(), derivation_path.as_deref())?;
-    let expected = chain::set_contenthash(env, &owner, &domain, &content_cid).await?;
-    let onchain = chain::resolve_contenthash(env, &domain).await?;
+    let asset_hub = chain::asset_hub_client(env).await?;
+    let expected = chain::set_contenthash(&asset_hub, env, &owner, &domain, &content_cid).await?;
+    let onchain = chain::resolve_contenthash(&asset_hub, env, &domain).await?;
     if onchain != expected {
         bail!(
             "read-back mismatch: set 0x{} but chain has 0x{}",
@@ -73,7 +75,9 @@ pub async fn run(
     let label = domain.strip_suffix(".dot").unwrap_or(&domain);
     println!();
     println!("deployed {content_cid}");
-    println!("url      https://{label}.dot.li");
+    if !env.web_gateway.is_empty() {
+        println!("url      https://{label}.{}", env.web_gateway);
+    }
     Ok(())
 }
 

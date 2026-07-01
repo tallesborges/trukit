@@ -12,6 +12,11 @@ pub enum Cmd {
         /// The .dot name (e.g. myapp00.dot).
         name: String,
     },
+    /// Register an open-tier .dot name (commit/reveal) to the signer.
+    Register {
+        /// The .dot name to register (e.g. myapp00.dot).
+        name: String,
+    },
     /// Read or set a .dot name's raw contenthash record.
     #[command(subcommand)]
     Content(ContentCmd),
@@ -40,17 +45,22 @@ pub async fn run(
     match cmd {
         Cmd::Resolve { name } => {
             let name = dotns::normalize_name(&name);
-            let contenthash = chain::resolve_contenthash(env, &name).await?;
+            let client = chain::asset_hub_client(env).await?;
+            let contenthash = chain::resolve_contenthash(&client, env, &name).await?;
             if contenthash.is_empty() {
                 println!("no contenthash set for {name}");
             } else {
                 println!("{}", dotns::contenthash_to_cid(&contenthash)?);
             }
         }
+        Cmd::Register { name } => {
+            register(env, &name, mnemonic, derivation_path).await?;
+        }
         Cmd::Content(ContentCmd::Read(args)) => {
             let raw = args.first().context("usage: name content <name>")?;
             let name = dotns::normalize_name(raw);
-            let contenthash = chain::resolve_contenthash(env, &name).await?;
+            let client = chain::asset_hub_client(env).await?;
+            let contenthash = chain::resolve_contenthash(&client, env, &name).await?;
             if contenthash.is_empty() {
                 println!("no contenthash set for {name}");
             } else {
@@ -61,6 +71,24 @@ pub async fn run(
             set(env, &name, &cid, mnemonic, derivation_path).await?;
         }
     }
+    Ok(())
+}
+
+async fn register(
+    env: &Env,
+    name: &str,
+    mnemonic: Option<String>,
+    derivation_path: Option<String>,
+) -> Result<()> {
+    let name = dotns::normalize_name(name);
+    let signer = chain::build_signer(mnemonic.as_deref(), derivation_path.as_deref())?;
+
+    let (owner, value_native) = chain::register_name(env, &signer, &name).await?;
+    let cost_pas = value_native as f64 / 1e10;
+    println!(
+        "registered {name} -> owner 0x{} (cost ~{cost_pas} PAS)",
+        hex::encode(owner.0)
+    );
     Ok(())
 }
 
@@ -76,9 +104,10 @@ async fn set(
     let signer = chain::build_signer(mnemonic.as_deref(), derivation_path.as_deref())?;
 
     println!("binding {name} -> {cid}");
-    let expected = chain::set_contenthash(env, &signer, &name, &cid).await?;
+    let client = chain::asset_hub_client(env).await?;
+    let expected = chain::set_contenthash(&client, env, &signer, &name, &cid).await?;
 
-    let onchain = chain::resolve_contenthash(env, &name).await?;
+    let onchain = chain::resolve_contenthash(&client, env, &name).await?;
     if onchain != expected {
         bail!(
             "read-back mismatch: set 0x{} but chain has 0x{}",

@@ -1,13 +1,39 @@
 use crate::dotns;
 use crate::env::Env;
+use crate::registrar;
 use anyhow::{bail, Context, Result};
 use cid::Cid;
+use futures::StreamExt;
 use multihash_codetable::{Code, MultihashDigest};
+use rand::RngCore;
 use scale_info::PortableRegistry;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+use subxt::metadata::ArcMetadata;
 use subxt::utils::{AccountId32, H160};
 use subxt::{OnlineClient, PolkadotConfig};
 use subxt_signer::{sr25519::Keypair, SecretUri};
+
+/// Per-client cache of runtime metadata keyed by spec version. subxt 0.50 fetches
+/// metadata lazily on the first block access and offers the [`subxt::Config`] the
+/// chance to cache it via [`subxt::Config::set_metadata_for_spec_version`]. The
+/// default trait methods are no-ops, so a bespoke `Config` re-downloads metadata
+/// on *every* `at_current_block`/`tx`/`wait_for_success` call; wiring this cache
+/// in makes a reused client download each runtime's metadata exactly once.
+#[derive(Debug, Clone, Default)]
+struct MetadataCache(Arc<RwLock<HashMap<u32, ArcMetadata>>>);
+
+impl MetadataCache {
+    fn get(&self, spec_version: u32) -> Option<ArcMetadata> {
+        self.0.read().unwrap().get(&spec_version).cloned()
+    }
+
+    fn set(&self, spec_version: u32, metadata: ArcMetadata) {
+        self.0.write().unwrap().insert(spec_version, metadata);
+    }
+}
 
 #[subxt::subxt(runtime_metadata_path = "artifacts/paseo_next_v2_asset_hub.scale")]
 pub mod asset_hub {}
@@ -157,10 +183,13 @@ type BulletinTxExtensions = (
 
 /// subxt [`Config`] for the Bulletin chain. Account/address/signature/hashing all
 /// match a standard Substrate chain; only the transaction-extension set differs.
-/// All other config hooks fall back to their defaults, so the `OnlineClient`
-/// fetches genesis hash, runtime version and metadata straight from the node.
+/// Genesis hash and runtime version are still fetched from the node, but the
+/// [`MetadataCache`] keeps each spec version's metadata so a reused client
+/// downloads it once instead of on every block access.
 #[derive(Debug, Clone, Default)]
-pub struct BulletinConfig;
+pub struct BulletinConfig {
+    metadata_cache: MetadataCache,
+}
 
 impl subxt::Config for BulletinConfig {
     type AccountId = AccountId32;
@@ -170,6 +199,14 @@ impl subxt::Config for BulletinConfig {
     type Header = <PolkadotConfig as subxt::Config>::Header;
     type AssetId = u32;
     type TransactionExtensions = BulletinTxExtensions;
+
+    fn metadata_for_spec_version(&self, spec_version: u32) -> Option<ArcMetadata> {
+        self.metadata_cache.get(spec_version)
+    }
+
+    fn set_metadata_for_spec_version(&self, spec_version: u32, metadata: ArcMetadata) {
+        self.metadata_cache.set(spec_version, metadata);
+    }
 }
 
 /// Asset Hub (paseo-next-v2) lists 17 transaction extensions in this exact
@@ -204,7 +241,9 @@ type AssetHubTxExtensions = (
 /// only used by `ChargeAssetTxPayment`, which we always call with `None`, so the
 /// concrete type never affects the encoded bytes.
 #[derive(Debug, Clone, Default)]
-pub struct AssetHubConfig;
+pub struct AssetHubConfig {
+    metadata_cache: MetadataCache,
+}
 
 impl subxt::Config for AssetHubConfig {
     type AccountId = AccountId32;
@@ -214,6 +253,14 @@ impl subxt::Config for AssetHubConfig {
     type Header = <PolkadotConfig as subxt::Config>::Header;
     type AssetId = u32;
     type TransactionExtensions = AssetHubTxExtensions;
+
+    fn metadata_for_spec_version(&self, spec_version: u32) -> Option<ArcMetadata> {
+        self.metadata_cache.get(spec_version)
+    }
+
+    fn set_metadata_for_spec_version(&self, spec_version: u32, metadata: ArcMetadata) {
+        self.metadata_cache.set(spec_version, metadata);
+    }
 }
 
 /// CIDv1 (raw codec `0x55`, sha2-256 multihash) of a blob's bytes — the CID the
@@ -235,6 +282,296 @@ pub fn content_hash(data: &[u8]) -> [u8; 32] {
 pub enum StoreOutcome {
     Stored { block: u32, index: u32 },
     AlreadyPresent { block: u32, index: u32 },
+}
+
+/// A CARv1 block ready to upload: its IPLD `codec`, raw `data`, and the sha2-256
+/// `content_hash` the Bulletin chain keys it by in `TransactionByContentHash`.
+pub struct PreparedBlock {
+    pub codec: u64,
+    pub data: Vec<u8>,
+    pub content_hash: [u8; 32],
+}
+
+/// The `BulletinConfig` transaction-extension params, one slot per extension in
+/// [`BulletinTxExtensions`]. Only `CheckMortality`, `CheckNonce` and
+/// `ChargeTransactionPayment` take a non-`()` value; the rest are empty.
+type StoreParams = (
+    (),
+    (),
+    (),
+    (),
+    (),
+    tx_ext::CheckMortalityParams<BulletinConfig>,
+    tx_ext::CheckNonceParams,
+    (),
+    tx_ext::ChargeTransactionPaymentParams,
+    (),
+    (),
+    (),
+    (),
+);
+
+/// Params for a store extrinsic pinned to an explicit `nonce`. Immortal era so a
+/// signed extrinsic stays valid across the submit/confirm/retry window, and no
+/// tip (`AllowanceBasedPriority` gives every store call the same max priority).
+fn store_params(nonce: u64) -> StoreParams {
+    (
+        (),
+        (),
+        (),
+        (),
+        (),
+        tx_ext::CheckMortalityParams::immortal(),
+        tx_ext::CheckNonceParams::with_nonce(nonce),
+        (),
+        tx_ext::ChargeTransactionPaymentParams::no_tip(),
+        (),
+        (),
+        (),
+        (),
+    )
+}
+
+async fn connect_bulletin(rpc_url: &str) -> Result<OnlineClient<BulletinConfig>> {
+    OnlineClient::<BulletinConfig>::from_url(rpc_url)
+        .await
+        .with_context(|| format!("connecting to Bulletin RPC {rpc_url}"))
+}
+
+/// Open a Bulletin client using the bespoke [`BulletinConfig`]. Reuse a single
+/// client per command so each runtime's metadata is downloaded once and then
+/// served from the client's [`MetadataCache`] on subsequent block accesses.
+pub async fn bulletin_client(env: &Env) -> Result<OnlineClient<BulletinConfig>> {
+    connect_bulletin(env.bulletin_rpc).await
+}
+
+async fn is_stored(
+    at: &subxt::client::ClientAtBlock<
+        BulletinConfig,
+        impl subxt::client::OnlineClientAtBlockT<BulletinConfig>,
+    >,
+    content_hash: [u8; 32],
+) -> Result<bool> {
+    let existing = at
+        .storage()
+        .try_fetch(
+            bulletin::storage()
+                .transaction_storage()
+                .transaction_by_content_hash(),
+            (content_hash,),
+        )
+        .await
+        .context("reading TransactionStorage.TransactionByContentHash")?;
+    Ok(existing.is_some())
+}
+
+/// Build a signed, ready-to-submit store extrinsic for `block`, pinned to an
+/// explicit `nonce`. Offline (no RPC): the returned [`subxt::tx::SubmittableTransaction`]
+/// owns its encoded bytes plus a cheap client handle, so a batch of them can be
+/// submitted and watched to inclusion concurrently.
+fn build_store_submittable<C>(
+    tx_client: &subxt::tx::TransactionsClient<BulletinConfig, C>,
+    signer: &Keypair,
+    block: &PreparedBlock,
+    nonce: u64,
+) -> Result<subxt::tx::SubmittableTransaction<BulletinConfig, C>>
+where
+    C: subxt::client::OnlineClientAtBlockT<BulletinConfig>,
+{
+    let cid_config =
+        bulletin::runtime_types::bulletin_transaction_storage_primitives::cids::CidConfig {
+            codec: block.codec,
+            hashing:
+                bulletin::runtime_types::bulletin_transaction_storage_primitives::cids::HashingAlgorithm::Sha2_256,
+        };
+    let call = bulletin::tx()
+        .transaction_storage()
+        .store_with_cid_config(cid_config, block.data.clone());
+    tx_client
+        .create_signable_offline(&call, store_params(nonce))
+        .context(
+            "building signed store extrinsic \
+             (if this fails after a runtime upgrade the pinned metadata is stale — \
+             regenerate artifacts/*.scale)",
+        )?
+        .sign(signer)
+        .context("signing store extrinsic")
+}
+
+/// Submit `sub` fire-and-forget: return once the node accepts it into the pool
+/// (its first status), without waiting for inclusion. Inclusion is confirmed out
+/// of band by reading `TransactionByContentHash` at the best block. A duplicate
+/// store (content a concurrent deploy already stored) is a benign success on this
+/// runtime — it dedups by content hash and does not emit `ExtrinsicFailed` — so
+/// no already-stored special-casing is needed.
+async fn submit_store<C>(
+    tx_client: &subxt::tx::TransactionsClient<BulletinConfig, C>,
+    signer: &Keypair,
+    block: &PreparedBlock,
+    nonce: u64,
+) -> Result<()>
+where
+    C: subxt::client::OnlineClientAtBlockT<BulletinConfig>,
+{
+    let sub = build_store_submittable(tx_client, signer, block, nonce)?;
+    tokio::time::timeout(FIRE_TIMEOUT, sub.submit())
+        .await
+        .context("timed out submitting store_with_cid_config")?
+        .context("submitting store_with_cid_config")?;
+    Ok(())
+}
+
+/// Upper bound on store extrinsics submitted concurrently.
+const UPLOAD_CONCURRENCY: usize = 20;
+/// How many fire/confirm rounds before giving up on the stragglers.
+const MAX_ATTEMPTS: usize = 5;
+/// Backoff between retry rounds after a transient submit/inclusion failure.
+const RETRY_BACKOFF: Duration = Duration::from_secs(2);
+/// Cap on how long a single `submit()` may block before we treat it as failed.
+const FIRE_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long to wait for a fired batch to be *included* (best block) before
+/// re-firing the stragglers — a handful of ~6s blocks, well under finalization.
+const CONFIRM_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Store every [`PreparedBlock`] on the Bulletin chain, fast and idempotently.
+///
+/// A single finalized-block snapshot probes all content hashes concurrently, so
+/// blocks a prior run already finalized are skipped up front (cross-run
+/// idempotency), and duplicate content within the CAR is stored once. The rest
+/// are signed offline with dense nonces (`base + j`), fired at bounded
+/// concurrency, and confirmed at *inclusion* by reading `TransactionByContentHash`
+/// on each new **best** block (~6–12s) rather than the finalized block (~40–60s)
+/// — keyed by content hash, so a block a concurrent deploy stores also counts.
+/// Whatever is still missing after the confirm window is re-fired with a freshly
+/// fetched nonce, reconnecting on RPC drop; only a full run of failed attempts is
+/// fatal. `on_progress(done, stored, skipped)` fires as blocks confirm. Returns
+/// `(stored, skipped)`.
+pub async fn store_car_blocks(
+    client: &OnlineClient<BulletinConfig>,
+    rpc_url: &str,
+    signer: &Keypair,
+    blocks: &[PreparedBlock],
+    mut on_progress: impl FnMut(usize, usize, usize),
+) -> Result<(usize, usize)> {
+    let total = blocks.len();
+    let account = account_id(signer);
+    let mut client = client.clone();
+
+    let at = client.at_current_block().await?;
+    let probes = blocks
+        .iter()
+        .map(|block| is_stored(&at, block.content_hash));
+    let present = futures::future::join_all(probes).await;
+    drop(at);
+
+    let mut skipped = 0usize;
+    let mut todo = Vec::new();
+    let mut seen: HashSet<[u8; 32]> = HashSet::new();
+    for (idx, present) in present.into_iter().enumerate() {
+        if present? || !seen.insert(blocks[idx].content_hash) {
+            skipped += 1;
+        } else {
+            todo.push(idx);
+        }
+    }
+    let mut stored = 0usize;
+    on_progress(stored + skipped, stored, skipped);
+
+    let mut attempt = 0usize;
+    let mut last_error: Option<anyhow::Error> = None;
+    while !todo.is_empty() {
+        attempt += 1;
+        if attempt > MAX_ATTEMPTS {
+            let detail = last_error
+                .map(|e| format!(": last error: {e:#}"))
+                .unwrap_or_default();
+            bail!(
+                "gave up storing {} of {total} blocks after {MAX_ATTEMPTS} attempts{detail}",
+                todo.len()
+            );
+        }
+        if attempt > 1 {
+            tokio::time::sleep(RETRY_BACKOFF).await;
+        }
+
+        let tx_client = match client.tx().await {
+            Ok(tx_client) => tx_client,
+            Err(_) => {
+                client = connect_bulletin(rpc_url).await?;
+                client.tx().await?
+            }
+        };
+        let base_nonce = tx_client
+            .account_nonce(&account)
+            .await
+            .context("fetching account nonce")?;
+
+        let fires = todo.iter().enumerate().map(|(offset, &idx)| {
+            let tx_client = &tx_client;
+            let block = &blocks[idx];
+            let nonce = base_nonce + offset as u64;
+            async move { submit_store(tx_client, signer, block, nonce).await }
+        });
+        let outcomes: Vec<Result<()>> = futures::stream::iter(fires)
+            .buffer_unordered(UPLOAD_CONCURRENCY)
+            .collect()
+            .await;
+        if let Some(e) = outcomes.into_iter().filter_map(Result::err).next() {
+            last_error = Some(e);
+        }
+
+        // Confirm at inclusion: read TransactionByContentHash at each new best
+        // (not-yet-finalized) block, so stores land in ~6–12s not ~40–60s.
+        let deadline = tokio::time::Instant::now() + CONFIRM_TIMEOUT;
+        let mut best = match client.stream_best_blocks().await {
+            Ok(best) => best,
+            Err(_) => {
+                client = connect_bulletin(rpc_url).await?;
+                client.stream_best_blocks().await?
+            }
+        };
+        while !todo.is_empty() {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let block = match tokio::time::timeout(remaining, best.next()).await {
+                Ok(Some(Ok(block))) => block,
+                Ok(Some(Err(e))) => {
+                    last_error = Some(anyhow::anyhow!("best-block stream error: {e}"));
+                    break;
+                }
+                Ok(None) | Err(_) => break,
+            };
+            let at = match block.at().await {
+                Ok(at) => at,
+                Err(_) => continue,
+            };
+            let checks = todo
+                .iter()
+                .map(|&idx| is_stored(&at, blocks[idx].content_hash));
+            let present = futures::future::join_all(checks).await;
+            drop(at);
+
+            let mut still = Vec::with_capacity(todo.len());
+            for (&idx, present) in todo.iter().zip(present) {
+                match present {
+                    Ok(true) => {
+                        stored += 1;
+                        on_progress(stored + skipped, stored, skipped);
+                    }
+                    Ok(false) => still.push(idx),
+                    Err(e) => {
+                        last_error = Some(e);
+                        still.push(idx);
+                    }
+                }
+            }
+            todo = still;
+        }
+    }
+
+    Ok((stored, skipped))
 }
 
 /// Store one blob (an IPLD block) on the Bulletin chain under its own content
@@ -324,11 +661,11 @@ pub fn account_id(signer: &Keypair) -> AccountId32 {
 }
 
 /// Resolve the H160 (EVM) address for an account via the `ReviveApi.address`
-/// runtime API on the env's Asset Hub.
-pub async fn revive_address(env: &Env, account: AccountId32) -> Result<H160> {
-    let client = OnlineClient::<PolkadotConfig>::from_url(env.asset_hub_rpc)
-        .await
-        .with_context(|| format!("connecting to Asset Hub RPC {}", env.asset_hub_rpc))?;
+/// runtime API on the given Asset Hub client.
+pub async fn revive_address(
+    client: &OnlineClient<AssetHubConfig>,
+    account: AccountId32,
+) -> Result<H160> {
     let call = asset_hub::runtime_apis().revive_api().address(account);
     let h160 = client
         .at_current_block()
@@ -338,14 +675,6 @@ pub async fn revive_address(env: &Env, account: AccountId32) -> Result<H160> {
         .await
         .context("ReviveApi.address runtime call failed")?;
     Ok(h160)
-}
-
-/// Latest finalized block number for an RPC, used as a connectivity proof.
-pub async fn latest_block_number(rpc: &str) -> Result<u64> {
-    let client = OnlineClient::<PolkadotConfig>::from_url(rpc)
-        .await
-        .with_context(|| format!("connecting to RPC {rpc}"))?;
-    Ok(client.at_current_block().await?.block_number())
 }
 
 fn parse_h160(addr: &str) -> Result<H160> {
@@ -359,17 +688,19 @@ fn parse_h160(addr: &str) -> Result<H160> {
 }
 
 /// Read a `.dot` name's raw DotNS contenthash bytes (EIP-1577, e.g. `0xe301…`)
-/// by dry-running the resolver's `contenthash(bytes32)` view via `ReviveApi.call`.
-/// Returns empty when no contenthash is set. `name` must be normalized already.
-pub async fn resolve_contenthash(env: &Env, name: &str) -> Result<Vec<u8>> {
+/// by dry-running the resolver's `contenthash(bytes32)` view via `ReviveApi.call`
+/// on the given Asset Hub client. Returns empty when no contenthash is set.
+/// `name` must be normalized already.
+pub async fn resolve_contenthash(
+    client: &OnlineClient<AssetHubConfig>,
+    env: &Env,
+    name: &str,
+) -> Result<Vec<u8>> {
     let node = dotns::namehash(name);
     let input_data = dotns::encode_contenthash_call(node);
     let dest = parse_h160(env.dotns_content_resolver)?;
     let origin = account_id(&build_signer(None, None)?);
 
-    let client = OnlineClient::<PolkadotConfig>::from_url(env.asset_hub_rpc)
-        .await
-        .with_context(|| format!("connecting to Asset Hub RPC {}", env.asset_hub_rpc))?;
     let call = asset_hub::runtime_apis()
         .revive_api()
         .call(origin, dest, 0, None, None, input_data);
@@ -435,23 +766,60 @@ pub async fn ensure_mapped(client: &OnlineClient<AssetHubConfig>, signer: &Keypa
     Ok(())
 }
 
-/// Submit a signed `Revive.call` to `dest` with `calldata`. Ensures the signer
-/// is mapped, dry-runs via `ReviveApi.call` to derive gas + storage-deposit
-/// limits (and to reject reverts before spending fees), then submits with a ~20%
-/// margin and waits for finalization. Returns the finalized extrinsic hash.
+/// Read-only `ReviveApi.call` dry-run against `dest` with `calldata`, returning
+/// the raw ABI-encoded return data. Rejects on-chain errors and reverts so
+/// callers can treat a successful result as authoritative. Nothing is submitted.
+pub async fn revive_view(
+    client: &OnlineClient<AssetHubConfig>,
+    origin: AccountId32,
+    dest: H160,
+    value: u128,
+    calldata: Vec<u8>,
+) -> Result<Vec<u8>> {
+    let call = asset_hub::runtime_apis()
+        .revive_api()
+        .call(origin, dest, value, None, None, calldata);
+    let outcome = client
+        .at_current_block()
+        .await?
+        .runtime_apis()
+        .call(call)
+        .await
+        .context("ReviveApi.call dry-run failed")?;
+
+    let exec = match outcome.result {
+        Ok(exec) => exec,
+        Err(err) => bail!("view call failed on chain: {err:?}"),
+    };
+    if exec.flags.bits & 1 != 0 {
+        bail!("view call reverted");
+    }
+    Ok(exec.data)
+}
+
+/// Submit a signed `Revive.call` to `dest` with `calldata`, transferring `value`
+/// native tokens (0 for non-payable calls). Ensures the signer is mapped,
+/// dry-runs via `ReviveApi.call` to derive gas + storage-deposit limits (and to
+/// reject reverts before spending fees), then submits with a ~20% margin and
+/// waits for finalization. Returns the finalized extrinsic hash.
 pub async fn revive_call(
     client: &OnlineClient<AssetHubConfig>,
     signer: &Keypair,
     dest: H160,
+    value: u128,
     calldata: Vec<u8>,
 ) -> Result<[u8; 32]> {
     ensure_mapped(client, signer).await?;
 
     let origin = account_id(signer);
-    let dry =
-        asset_hub::runtime_apis()
-            .revive_api()
-            .call(origin, dest, 0, None, None, calldata.clone());
+    let dry = asset_hub::runtime_apis().revive_api().call(
+        origin,
+        dest,
+        value,
+        None,
+        None,
+        calldata.clone(),
+    );
     let outcome = client
         .at_current_block()
         .await?
@@ -489,7 +857,7 @@ pub async fn revive_call(
     let call =
         asset_hub::tx()
             .revive()
-            .call(dest, 0, weight_limit, storage_deposit_limit, calldata);
+            .call(dest, value, weight_limit, storage_deposit_limit, calldata);
     let events = client
         .tx()
         .await?
@@ -527,9 +895,11 @@ pub async fn transfer_keep_alive(
 }
 
 /// Bind a normalized `.dot` `name` to `cid` by submitting a signed
-/// `setContenthash(node, 0xe301 ++ cid)` to the env's DotNS content resolver.
-/// Returns the raw contenthash bytes that were set (for read-back verification).
+/// `setContenthash(node, 0xe301 ++ cid)` to the env's DotNS content resolver on
+/// the given Asset Hub client. Returns the raw contenthash bytes that were set
+/// (for read-back verification).
 pub async fn set_contenthash(
+    client: &OnlineClient<AssetHubConfig>,
     env: &Env,
     signer: &Keypair,
     name: &str,
@@ -540,8 +910,128 @@ pub async fn set_contenthash(
     let calldata = dotns::encode_set_contenthash_call(node, &contenthash);
     let dest = parse_h160(env.dotns_content_resolver)?;
 
-    let client = asset_hub_client(env).await?;
-    let block = revive_call(&client, signer, dest, calldata).await?;
+    let block = revive_call(client, signer, dest, 0, calldata).await?;
     println!("setContenthash finalized (tx 0x{})", hex::encode(block));
     Ok(contenthash)
+}
+
+/// Register an open-tier `.dot` `name` for `signer` via the commit/reveal flow on
+/// the DotNS RegistrarController. Signs and submits `commit` then, after the
+/// commitment matures, the payable `register`, and verifies ownership in the
+/// Registry. Returns the owner H160 and the native value paid. `name` must be
+/// normalized already.
+pub async fn register_name(env: &Env, signer: &Keypair, name: &str) -> Result<(H160, u128)> {
+    let label = name.strip_suffix(".dot").unwrap_or(name).to_string();
+
+    let registrar = parse_h160(env.registrar_controller)?;
+    let pop_rules = parse_h160(env.pop_rules)?;
+    let registry = parse_h160(env.registry)?;
+
+    let client = asset_hub_client(env).await?;
+    ensure_mapped(&client, signer).await?;
+
+    let origin = account_id(signer);
+    let owner = client
+        .at_current_block()
+        .await?
+        .runtime_apis()
+        .call(
+            asset_hub::runtime_apis()
+                .revive_api()
+                .address(origin.clone()),
+        )
+        .await
+        .context("ReviveApi.address runtime call failed")?;
+
+    let status_data = revive_view(
+        &client,
+        origin.clone(),
+        pop_rules,
+        0,
+        registrar::encode_classify_name(&label),
+    )
+    .await?;
+    let status = registrar::decode_classify_status(&status_data)?;
+    if status != 0 {
+        bail!(
+            "{name} requires PoP tier {status} (not open); \
+             trikit only supports open-tier registration"
+        );
+    }
+
+    let price_data = revive_view(
+        &client,
+        origin.clone(),
+        pop_rules,
+        0,
+        registrar::encode_price(&label, owner),
+    )
+    .await?;
+    let price_wei = registrar::decode_price(&price_data)?;
+    let value_native = registrar::register_value_native(price_wei)?;
+
+    let mut secret = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut secret);
+
+    let commitment_data = revive_view(
+        &client,
+        origin.clone(),
+        registrar,
+        0,
+        registrar::encode_make_commitment(registrar::registration(&label, owner, secret)),
+    )
+    .await?;
+    let commitment = registrar::decode_commitment(&commitment_data)?;
+
+    println!(
+        "committing {name} (commitment 0x{})",
+        hex::encode(commitment)
+    );
+    let commit_tx = revive_call(
+        &client,
+        signer,
+        registrar,
+        0,
+        registrar::encode_commit(commitment),
+    )
+    .await?;
+    println!("commit   finalized (tx 0x{})", hex::encode(commit_tx));
+
+    let age_data = revive_view(
+        &client,
+        origin.clone(),
+        registrar,
+        0,
+        registrar::encode_min_commitment_age(),
+    )
+    .await?;
+    let min_age = registrar::decode_min_commitment_age(&age_data)?;
+    let wait = min_age + 6;
+    println!("waiting {wait}s for commitment to mature");
+    tokio::time::sleep(Duration::from_secs(wait)).await;
+
+    println!("registering {name} (value {value_native} plancks)");
+    let register_tx = revive_call(
+        &client,
+        signer,
+        registrar,
+        value_native,
+        registrar::encode_register(registrar::registration(&label, owner, secret)),
+    )
+    .await?;
+    println!("register finalized (tx 0x{})", hex::encode(register_tx));
+
+    let node = dotns::namehash(name);
+    let owner_data =
+        revive_view(&client, origin, registry, 0, registrar::encode_owner(node)).await?;
+    let onchain_owner = registrar::decode_owner(&owner_data)?;
+    if onchain_owner != owner {
+        bail!(
+            "ownership verification failed: Registry owner is 0x{} but expected 0x{}",
+            hex::encode(onchain_owner.0),
+            hex::encode(owner.0)
+        );
+    }
+
+    Ok((owner, value_native))
 }

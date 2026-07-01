@@ -2,6 +2,7 @@ mod chain;
 mod commands;
 mod dotns;
 mod env;
+mod registrar;
 
 use clap::{Parser, Subcommand};
 

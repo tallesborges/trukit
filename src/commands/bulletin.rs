@@ -2,6 +2,8 @@ use crate::chain::{self, bulletin, BulletinConfig};
 use crate::env::Env;
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
+use rand::Rng;
+use std::io::Write;
 use std::str::FromStr;
 use subxt::utils::AccountId32;
 use subxt::OnlineClient;
@@ -56,10 +58,13 @@ fn resolve_signer(mnemonic: Option<String>, derivation_path: Option<String>) -> 
     }
 }
 
-/// The Bulletin-authorized pool signer (dev-phrase `//deploy/0`). `deploy` uses
-/// this to store blocks regardless of the domain-owner mnemonic.
+/// The Bulletin-authorized pool signer. Picks a random `//deploy/N` (N in 0..=9,
+/// all authorized) to spread load across the shared pool accounts and reduce
+/// nonce contention with concurrent deploys. `deploy` uses this to store blocks
+/// regardless of the domain-owner mnemonic.
 pub fn pool_signer() -> Result<Keypair> {
-    chain::build_signer(Some(DEV_PHRASE), Some("//deploy/0"))
+    let n = rand::thread_rng().gen_range(0..=9);
+    chain::build_signer(Some(DEV_PHRASE), Some(&format!("//deploy/{n}")))
 }
 
 async fn status(
@@ -150,8 +155,14 @@ pub struct CarStored {
 
 /// Store every IPLD block of a CARv1 individually (each keyed by its own content
 /// hash) so the CAR's root DAG resolves on the IPFS gateway. Kubo chunks files
-/// into ≤256 KiB blocks, so every block fits a single ≤2 MiB extrinsic.
-pub async fn store_car_file(env: &Env, path: &str, signer: &Keypair) -> Result<CarStored> {
+/// into ≤256 KiB blocks, so every block fits a single ≤2 MiB extrinsic. Reuses
+/// the single `client` for the whole upload so metadata is downloaded once.
+pub async fn store_car_file(
+    env: &Env,
+    client: &OnlineClient<BulletinConfig>,
+    path: &str,
+    signer: &Keypair,
+) -> Result<CarStored> {
     let file = tokio::fs::File::open(path)
         .await
         .with_context(|| format!("opening CAR file {path}"))?;
@@ -165,12 +176,7 @@ pub async fn store_car_file(env: &Env, path: &str, signer: &Keypair) -> Result<C
         .first()
         .context("CAR header has no roots")?;
 
-    let client = OnlineClient::<BulletinConfig>::from_url(env.bulletin_rpc)
-        .await
-        .with_context(|| format!("connecting to Bulletin RPC {}", env.bulletin_rpc))?;
-
-    let mut stored = 0usize;
-    let mut skipped = 0usize;
+    let mut prepared = Vec::new();
     while let Some((cid, data)) = car.next_block().await.context("reading next CAR block")? {
         let hash = cid.hash();
         if hash.code() != 0x12 {
@@ -179,7 +185,8 @@ pub async fn store_car_file(env: &Env, path: &str, signer: &Keypair) -> Result<C
                 hash.code()
             );
         }
-        if hash.digest() != chain::content_hash(&data) {
+        let content_hash = chain::content_hash(&data);
+        if hash.digest() != content_hash {
             bail!("block {cid}: CAR data does not hash to the CID digest (corrupt CAR?)");
         }
         if data.len() > MAX_TRANSACTION_SIZE {
@@ -188,11 +195,27 @@ pub async fn store_car_file(env: &Env, path: &str, signer: &Keypair) -> Result<C
                 data.len()
             );
         }
+        prepared.push(chain::PreparedBlock {
+            codec: cid.codec(),
+            data,
+            content_hash,
+        });
+    }
+    let total = prepared.len();
 
-        match chain::store_block(&client, signer, cid.codec(), &data).await? {
-            chain::StoreOutcome::Stored { .. } => stored += 1,
-            chain::StoreOutcome::AlreadyPresent { .. } => skipped += 1,
-        }
+    let (stored, skipped) = chain::store_car_blocks(
+        client,
+        env.bulletin_rpc,
+        signer,
+        &prepared,
+        |done, stored, skipped| {
+            eprint!("\r  blocks {done}/{total}  (stored {stored}, skipped {skipped})");
+            let _ = std::io::stderr().flush();
+        },
+    )
+    .await?;
+    if total > 0 {
+        eprintln!();
     }
 
     Ok(CarStored {
@@ -209,7 +232,8 @@ async fn store_car(
     derivation_path: Option<String>,
 ) -> Result<()> {
     let signer = resolve_signer(mnemonic, derivation_path)?;
-    let summary = store_car_file(env, &path, &signer).await?;
+    let client = chain::bulletin_client(env).await?;
+    let summary = store_car_file(env, &client, &path, &signer).await?;
 
     let total = summary.stored + summary.skipped;
     let gateway_url = format!("{}/ipfs/{}/", env.ipfs_gateway, summary.root);

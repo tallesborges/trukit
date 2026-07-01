@@ -17,6 +17,8 @@ cid = "0.11"
 multihash-codetable = { version = "0.2", features = ["sha2"] }
 scale-info = "2.11"
 iroh-car = "0.5"
+rand = "0.8"
+futures = "0.3"
 
 # Added per slice as the surfaces get wired (versions verified 2026-07):
 #   rust-unixfs = "0.6"       # UnixFS encoder (Slice 4; pin the SHA)
