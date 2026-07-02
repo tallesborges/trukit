@@ -3,9 +3,8 @@ use anyhow::{bail, Result};
 /// Resolved environment. `--env` selects the Bulletin RPC *and* the Asset Hub
 /// contract addresses as one matched set so v1/v2 addresses can never drift.
 ///
-/// Values verified 2026-07 against paritytech/bulletin-deploy assets/environments.json
-/// and dotli-community packages/config. The registrar/pop-rules/registry addresses
-/// are only known for paseo-next-v2 so far; the `preview` entries are placeholders
+/// Values verified 2026-07 against the canonical Paseo environment config. The
+/// registrar/pop-rules/registry addresses are only known for paseo-next-v2 so far; the `preview` entries are placeholders
 /// and `name register` on `preview` fails with a clear "invalid H160" error.
 #[derive(Debug, Clone)]
 pub struct Env {

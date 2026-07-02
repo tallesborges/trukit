@@ -2,7 +2,7 @@
 
 A fast single-binary Rust CLI for the Polkadot **Triangle/Trinity** ecosystem — **Bulletin** storage, **DotNS** naming (Asset Hub / `pallet_revive`), and **People / Statement Store**.
 
-The first-class command is `trukit deploy`, a native replacement for the `bulletin-deploy` + `@parity/dotns-cli` (Node) pair: it merkleizes a build directory, uploads the DAG to the Bulletin chain, and binds the content CID to a `.dot` domain — all from one static binary with no Node/Bun runtime and no `ipfs` daemon.
+The first-class command is `trukit deploy`, a native replacement for the existing Node-based deploy + `.dot` naming CLIs: it merkleizes a build directory, uploads the DAG to the Bulletin chain, and binds the content CID to a `.dot` domain — all from one static binary with no Node/Bun runtime and no `ipfs` daemon.
 
 ## Why
 
@@ -63,7 +63,7 @@ trukit name register myapp.dot
 ### Global flags
 
 - `--env <id>` — target environment (default `paseo-next-v2`).
-- `--mnemonic <phrase>` — signer mnemonic. Falls back to `$MNEMONIC`, then `$DOTNS_MNEMONIC`; defaults to the shared dev account used by `bulletin-deploy`/playground dev mode.
+- `--mnemonic <phrase>` — signer mnemonic. Falls back to `$MNEMONIC`, then `$DOTNS_MNEMONIC`; defaults to the shared bare-master dev account used on testnets.
 - `--derivation-path <path>` — Substrate derivation path (e.g. `//Alice`, `//deploy/0`).
 - `-q`, `--quiet` — suppress step/detail output; only errors are printed (useful in CI/scripts).
 
@@ -91,3 +91,4 @@ TRUKIT_COMPARE_DIR=./dist cargo test -- --ignored compare_env
 ## Status
 
 The `deploy` MVP is built and live-verified end-to-end on `paseo-next-v2`. Native merkleization (dropping the Kubo shell-out) is complete and golden-tested. Remaining work: config files + text records, non-open register tiers, and a chunked path for single blobs larger than 2 MiB.
+ than 2 MiB.
