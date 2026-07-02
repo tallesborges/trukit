@@ -1,6 +1,6 @@
 # trukit
 
-A fast single-binary Rust CLI for the Polkadot **Triangle/Trinity** ecosystem — **Bulletin** storage, **DotNS** naming (Asset Hub / `pallet_revive`), and **People / Statement Store**.
+A fast single-binary Rust CLI for the Polkadot **Triangle/Trinity** ecosystem — **Bulletin** storage and **DotNS** naming (Asset Hub / `pallet_revive`).
 
 The first-class command is `trukit deploy`, a native replacement for the existing Node-based deploy + `.dot` naming CLIs: it merkleizes a build directory, uploads the DAG to the Bulletin chain, and binds the content CID to a `.dot` domain — all from one static binary with no Node/Bun runtime and no `ipfs` daemon.
 
@@ -53,7 +53,6 @@ trukit name register myapp.dot
 | `account whoami` | Derive the signer and prove Asset Hub + Bulletin connectivity. |
 | `account map` | Ensure the signer has an H160 mapping (`Revive.map_account`). |
 | `account transfer <dest> <plancks>` | Send native PAS on Asset Hub. |
-| `statement …` | People / Statement Store ops. **Experimental** — wire format unverified. |
 
 ### `deploy` flags
 

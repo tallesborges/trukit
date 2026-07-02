@@ -2,7 +2,7 @@
 name = "trukit"
 version = "0.1.0"
 edition = "2021"
-description = "A fast Rust CLI for the Triangle/Trinity ecosystem (Bulletin · DotNS · People)"
+description = "A fast Rust CLI for the Triangle/Trinity ecosystem (Bulletin · DotNS)"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

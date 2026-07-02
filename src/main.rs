@@ -8,8 +8,8 @@ mod ui;
 
 use clap::{Parser, Subcommand};
 
-/// A fast CLI for the Triangle/Trinity ecosystem: Bulletin storage, DotNS naming
-/// (Asset Hub / pallet_revive), and People / Statement Store.
+/// A fast CLI for the Triangle/Trinity ecosystem: Bulletin storage and DotNS
+/// naming (Asset Hub / pallet_revive).
 #[derive(Parser)]
 #[command(name = "trukit", version, about)]
 struct Cli {
@@ -43,9 +43,6 @@ enum Command {
     /// DotNS naming ops on Asset Hub.
     #[command(subcommand)]
     Name(commands::name::Cmd),
-    /// People chain / Statement Store ops (research-first; wire format unverified).
-    #[command(subcommand)]
-    Statement(commands::statement::Cmd),
     /// Signer / account / environment utilities.
     #[command(subcommand)]
     Account(commands::account::Cmd),
@@ -81,7 +78,6 @@ async fn run() -> anyhow::Result<()> {
                 .or_else(|| std::env::var("DOTNS_MNEMONIC").ok());
             commands::name::run(&env, cmd, mnemonic, cli.derivation_path).await
         }
-        Command::Statement(cmd) => commands::statement::run(&env, cmd),
         Command::Account(cmd) => {
             let mnemonic = cli
                 .mnemonic
