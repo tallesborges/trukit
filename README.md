@@ -34,7 +34,7 @@ This merkleizes `./dist`, uploads every block to Bulletin, sets the contenthash 
 Register an open-tier name first if you need one:
 
 ```sh
-trukit name register myapp.dot
+trukit asset-hub name register myapp.dot
 ```
 
 ## Command surface
@@ -45,14 +45,14 @@ trukit name register myapp.dot
 | `bulletin store <file>` | Store a single blob (≤2 MiB) on Bulletin. |
 | `bulletin store-car <file.car>` | Store every block of a CARv1 so its root resolves. |
 | `bulletin status [--address <ss58>]` | Show authorization / quota for an account. |
-| `name resolve <name.dot>` | Resolve a name to its contenthash CID. |
-| `name register <name.dot>` | Register an open-tier name (commit/reveal) to the signer. |
-| `name content set <name.dot> <cid>` | Bind a CID to a name's contenthash. |
-| `name content <name.dot>` | Read a name's raw contenthash record. |
+| `asset-hub transfer <dest> <plancks>` | Send native PAS on Asset Hub. |
+| `asset-hub map` | Ensure the signer has an H160 mapping (`Revive.map_account`). |
+| `asset-hub name resolve <name.dot>` | Resolve a name to its contenthash CID. |
+| `asset-hub name register <name.dot>` | Register an open-tier name (commit/reveal) to the signer. |
+| `asset-hub name content set <name.dot> <cid>` | Bind a CID to a name's contenthash. |
+| `asset-hub name content <name.dot>` | Read a name's raw contenthash record. |
 | `account env` | Print the resolved environment config. |
 | `account whoami` | Derive the signer and prove Asset Hub + Bulletin connectivity. |
-| `account map` | Ensure the signer has an H160 mapping (`Revive.map_account`). |
-| `account transfer <dest> <plancks>` | Send native PAS on Asset Hub. |
 
 ### `deploy` flags
 
@@ -71,7 +71,7 @@ trukit name register myapp.dot
 | `--env` | Bulletin + Asset Hub | Notes |
 |---|---|---|
 | `paseo-next-v2` (default) | Paseo Next v2 | Full support; resolves at `<name>.paseo.li`. |
-| `preview` | PreviewNet | Partial — `name register` is not yet wired. |
+| `preview` | PreviewNet | Partial — `asset-hub name register` is not yet wired. |
 
 ## How merkleization stays Kubo-compatible
 

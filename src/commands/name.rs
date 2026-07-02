@@ -32,7 +32,7 @@ pub enum ContentCmd {
         /// The CIDv1 to bind (e.g. bafy...).
         cid: String,
     },
-    /// Read the raw contenthash record of a .dot name (`name content <name>`).
+    /// Read the raw contenthash record of a .dot name (`asset-hub name content <name>`).
     #[command(external_subcommand)]
     Read(Vec<String>),
 }

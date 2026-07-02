@@ -5,7 +5,7 @@ use anyhow::{bail, Result};
 ///
 /// Values verified 2026-07 against the canonical Paseo environment config. The
 /// registrar/pop-rules/registry addresses are only known for paseo-next-v2 so far; the `preview` entries are placeholders
-/// and `name register` on `preview` fails with a clear "invalid H160" error.
+/// and `asset-hub name register` on `preview` fails with a clear "invalid H160" error.
 #[derive(Debug, Clone)]
 pub struct Env {
     pub id: &'static str,

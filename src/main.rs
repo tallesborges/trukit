@@ -40,10 +40,10 @@ enum Command {
     /// Bulletin chain storage ops.
     #[command(subcommand)]
     Bulletin(commands::bulletin::Cmd),
-    /// DotNS naming ops on Asset Hub.
-    #[command(subcommand)]
-    Name(commands::name::Cmd),
-    /// Signer / account / environment utilities.
+    /// Asset Hub ops: transfers, H160 mapping, and DotNS naming.
+    #[command(name = "asset-hub", subcommand)]
+    AssetHub(commands::asset_hub::Cmd),
+    /// Signer / environment utilities (multichain).
     #[command(subcommand)]
     Account(commands::account::Cmd),
 }
@@ -71,12 +71,12 @@ async fn run() -> anyhow::Result<()> {
         Command::Bulletin(cmd) => {
             commands::bulletin::run(&env, cmd, cli.mnemonic, cli.derivation_path).await
         }
-        Command::Name(cmd) => {
+        Command::AssetHub(cmd) => {
             let mnemonic = cli
                 .mnemonic
                 .or_else(|| std::env::var("MNEMONIC").ok())
                 .or_else(|| std::env::var("DOTNS_MNEMONIC").ok());
-            commands::name::run(&env, cmd, mnemonic, cli.derivation_path).await
+            commands::asset_hub::run(&env, cmd, mnemonic, cli.derivation_path).await
         }
         Command::Account(cmd) => {
             let mnemonic = cli
