@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 /// A fast CLI for the Triangle/Trinity ecosystem: Bulletin storage and DotNS
 /// naming (Asset Hub / pallet_revive).
 #[derive(Parser)]
-#[command(name = "trukit", version, about)]
+#[command(name = "dotkit", version, about)]
 struct Cli {
     /// Target environment (drives Bulletin RPC + Asset Hub contract addresses together).
     #[arg(long, global = true, default_value = "paseo-next-v2")]

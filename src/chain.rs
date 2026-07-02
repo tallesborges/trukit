@@ -28,7 +28,7 @@ use subxt_signer::{sr25519::Keypair, SecretUri};
 /// on *every* `at_current_block`/`tx`/`wait_for_success` call; wiring this cache
 /// in makes a reused client download each runtime's metadata exactly once.
 ///
-/// Because every `trukit` invocation is a fresh process, this in-memory cache is
+/// Because every `dotkit` invocation is a fresh process, this in-memory cache is
 /// additionally *pre-seeded* from the persistent on-disk cache (see
 /// [`load_cached_metadata`]) before the client is built, so an unchanged runtime
 /// spec version is served entirely from disk with no metadata download at all.
@@ -45,22 +45,22 @@ impl MetadataCache {
     }
 }
 
-/// Directory for the cross-run runtime-metadata cache. Honors `TRUKIT_CACHE_DIR`,
-/// then `XDG_CACHE_HOME`, then `~/.cache`, filing metadata under `trukit/metadata`.
+/// Directory for the cross-run runtime-metadata cache. Honors `DOTKIT_CACHE_DIR`,
+/// then `XDG_CACHE_HOME`, then `~/.cache`, filing metadata under `dotkit/metadata`.
 /// Returns `None` when no location can be resolved — metadata is then fetched
 /// fresh every run (still correct, just not cached).
 fn metadata_cache_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("TRUKIT_CACHE_DIR").filter(|d| !d.is_empty()) {
+    if let Some(dir) = std::env::var_os("DOTKIT_CACHE_DIR").filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(dir));
     }
     if let Some(dir) = std::env::var_os("XDG_CACHE_HOME").filter(|d| !d.is_empty()) {
-        return Some(PathBuf::from(dir).join("trukit").join("metadata"));
+        return Some(PathBuf::from(dir).join("dotkit").join("metadata"));
     }
     let home = std::env::var_os("HOME").filter(|d| !d.is_empty())?;
     Some(
         PathBuf::from(home)
             .join(".cache")
-            .join("trukit")
+            .join("dotkit")
             .join("metadata"),
     )
 }
@@ -809,7 +809,7 @@ pub const DEV_PHRASE: &str =
     "bottom drive obey lake curtain smoke basket hold race lonely fit walk";
 
 /// Build an sr25519 signer from a mnemonic (+ optional derivation path). Defaults
-/// to the shared dev account so `trukit` owns the same dev-mode names on testnets.
+/// to the shared dev account so `dotkit` owns the same dev-mode names on testnets.
 /// Never logs the mnemonic.
 pub fn build_signer(mnemonic: Option<&str>, derivation_path: Option<&str>) -> Result<Keypair> {
     let phrase = mnemonic.unwrap_or(DEV_PHRASE);
@@ -1119,7 +1119,7 @@ pub async fn register_name(env: &Env, signer: &Keypair, name: &str) -> Result<(H
     if status != 0 {
         bail!(
             "{name} requires PoP tier {status} (not open); \
-             trukit only supports open-tier registration"
+             dotkit only supports open-tier registration"
         );
     }
 

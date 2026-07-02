@@ -1,8 +1,8 @@
-# trukit
+# dotkit
 
 A fast single-binary Rust CLI for the Polkadot **Triangle/Trinity** ecosystem — **Bulletin** storage and **DotNS** naming (Asset Hub / `pallet_revive`).
 
-The first-class command is `trukit deploy`, a native replacement for the existing Node-based deploy + `.dot` naming CLIs: it merkleizes a build directory, uploads the DAG to the Bulletin chain, and binds the content CID to a `.dot` domain — all from one static binary with no Node/Bun runtime and no `ipfs` daemon.
+The first-class command is `dotkit deploy`, a native replacement for the existing Node-based deploy + `.dot` naming CLIs: it merkleizes a build directory, uploads the DAG to the Bulletin chain, and binds the content CID to a `.dot` domain — all from one static binary with no Node/Bun runtime and no `ipfs` daemon.
 
 ## Why
 
@@ -15,10 +15,10 @@ The first-class command is `trukit deploy`, a native replacement for the existin
 Requires a recent stable Rust toolchain.
 
 ```sh
-git clone git@github.com:tallesborges/trukit.git
-cd trukit
+git clone git@github.com:tallesborges/dotkit.git
+cd dotkit
 cargo build --release
-# binary at ./target/release/trukit
+# binary at ./target/release/dotkit
 ```
 
 ## Quickstart
@@ -26,7 +26,7 @@ cargo build --release
 Deploy a built site to a `.dot` domain you own:
 
 ```sh
-trukit deploy ./dist myapp.dot
+dotkit deploy ./dist myapp.dot
 ```
 
 This merkleizes `./dist`, uploads every block to Bulletin, sets the contenthash on `myapp.dot`, and prints the gateway + `https://myapp.paseo.li` URL.
@@ -34,7 +34,7 @@ This merkleizes `./dist`, uploads every block to Bulletin, sets the contenthash 
 Register an open-tier name first if you need one:
 
 ```sh
-trukit asset-hub name register myapp.dot
+dotkit asset-hub name register myapp.dot
 ```
 
 ## Command surface
@@ -75,7 +75,7 @@ trukit asset-hub name register myapp.dot
 
 ## How merkleization stays Kubo-compatible
 
-`trukit deploy` builds the same content DAG that `ipfs add -r --cid-version=1 --raw-leaves --hidden` would, using [`rust-unixfs`](https://crates.io/crates/rust-unixfs)'s `FileAdder` + `BufferingTreeBuilder`. Files are added in lexicographic path order (hidden files included), chunked at 256 KiB, hashed with sha2-256, and wrapped in a directory root — the exact defaults Kubo uses for CIDv1. The produced blocks are stored on Bulletin keyed by their own content hash, so the root CID resolves on any IPFS gateway.
+`dotkit deploy` builds the same content DAG that `ipfs add -r --cid-version=1 --raw-leaves --hidden` would, using [`rust-unixfs`](https://crates.io/crates/rust-unixfs)'s `FileAdder` + `BufferingTreeBuilder`. Files are added in lexicographic path order (hidden files included), chunked at 256 KiB, hashed with sha2-256, and wrapped in a directory root — the exact defaults Kubo uses for CIDv1. The produced blocks are stored on Bulletin keyed by their own content hash, so the root CID resolves on any IPFS gateway.
 
 Parity is enforced by golden tests, including live cross-checks against `ipfs` when present:
 
@@ -84,10 +84,9 @@ Parity is enforced by golden tests, including live cross-checks against `ipfs` w
 cargo test merkle
 
 # compare our root vs kubo for any directory (needs ipfs on PATH)
-TRUKIT_COMPARE_DIR=./dist cargo test -- --ignored compare_env
+DOTKIT_COMPARE_DIR=./dist cargo test -- --ignored compare_env
 ```
 
 ## Status
 
 The `deploy` MVP is built and live-verified end-to-end on `paseo-next-v2`. Native merkleization (dropping the Kubo shell-out) is complete and golden-tested. Remaining work: config files + text records, non-open register tiers, and a chunked path for single blobs larger than 2 MiB.
- than 2 MiB.

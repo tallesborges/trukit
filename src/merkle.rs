@@ -104,7 +104,7 @@ pub fn merkleize_dir(dir: &str) -> Result<Merkleized> {
     }
 
     Ok(Merkleized {
-        root: to_trukit_cid(&root_ipld)?,
+        root: to_dotkit_cid(&root_ipld)?,
         blocks,
     })
 }
@@ -217,8 +217,8 @@ fn dagpb_links(block: &[u8]) -> Vec<IpldCid> {
     out
 }
 
-/// Convert an `ipld-core` CID into the `cid` crate CID the rest of trukit uses.
-fn to_trukit_cid(c: &IpldCid) -> Result<cid::Cid> {
+/// Convert an `ipld-core` CID into the `cid` crate CID the rest of dotkit uses.
+fn to_dotkit_cid(c: &IpldCid) -> Result<cid::Cid> {
     cid::Cid::try_from(c.to_bytes().as_slice()).context("converting merkleized root CID")
 }
 
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn small_dir_matches_kubo() {
-        let dir = std::env::temp_dir().join(format!("trukit-merkle-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dotkit-merkle-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), b"a").unwrap();
         std::fs::write(dir.join("b.txt"), b"bb").unwrap();
@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn nested_multichunk_dir_matches_kubo() {
         let dir = std::env::temp_dir().join(format!(
-            "trukit-merkle-nested-{}-{:?}",
+            "dotkit-merkle-nested-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -272,15 +272,15 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Live parity check against a real build dir: set `TRUKIT_COMPARE_DIR` to a
+    /// Live parity check against a real build dir: set `DOTKIT_COMPARE_DIR` to a
     /// directory and this asserts our native root equals `ipfs add -r --hidden
     /// --cid-version=1 --raw-leaves`. Ignored by default (needs `ipfs` on PATH):
-    ///   TRUKIT_COMPARE_DIR=../dotshare/dist cargo test -- --ignored compare_env
+    ///   DOTKIT_COMPARE_DIR=../dotshare/dist cargo test -- --ignored compare_env
     #[test]
     #[ignore]
     fn compare_env_dir_with_kubo() {
-        let Ok(dir) = std::env::var("TRUKIT_COMPARE_DIR") else {
-            eprintln!("set TRUKIT_COMPARE_DIR to run this comparison");
+        let Ok(dir) = std::env::var("DOTKIT_COMPARE_DIR") else {
+            eprintln!("set DOTKIT_COMPARE_DIR to run this comparison");
             return;
         };
         let kubo = std::process::Command::new("ipfs")
