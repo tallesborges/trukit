@@ -1,5 +1,6 @@
 mod chain;
 mod commands;
+mod config;
 mod dotns;
 mod env;
 mod merkle;

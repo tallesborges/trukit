@@ -23,3 +23,5 @@ scale-info = "2.11"
 iroh-car = "0.5"
 rand = "0.8"
 futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

@@ -1083,6 +1083,44 @@ pub async fn set_contenthash(
     Ok(contenthash)
 }
 
+/// Read a `.dot` name's `key` text record by dry-running the resolver's
+/// `text(bytes32,string)` view via `ReviveApi.call`. Returns an empty string
+/// when the record is unset. `name` must be normalized already.
+pub async fn resolve_text(
+    client: &OnlineClient<AssetHubConfig>,
+    env: &Env,
+    name: &str,
+    key: &str,
+) -> Result<String> {
+    let node = dotns::namehash(name);
+    let calldata = dotns::encode_text_call(node, key);
+    let dest = parse_h160(env.dotns_content_resolver)?;
+    let origin = account_id(&build_signer(None, None)?);
+
+    let data = revive_view(client, origin, dest, 0, calldata).await?;
+    dotns::decode_text_return(&data)
+}
+
+/// Set a `.dot` name's `key` text record to `value` by submitting a signed
+/// `setText(node, key, value)` to the env's DotNS resolver. Returns the finalized
+/// extrinsic hash. `name` must be normalized already.
+pub async fn set_text(
+    client: &OnlineClient<AssetHubConfig>,
+    env: &Env,
+    signer: &Keypair,
+    name: &str,
+    key: &str,
+    value: &str,
+) -> Result<[u8; 32]> {
+    let node = dotns::namehash(name);
+    let calldata = dotns::encode_set_text_call(node, key, value);
+    let dest = parse_h160(env.dotns_content_resolver)?;
+
+    let block = revive_call(client, signer, dest, 0, calldata).await?;
+    ui::kv("tx", format!("0x{}", hex::encode(block)));
+    Ok(block)
+}
+
 /// Register an open-tier `.dot` `name` for `signer` via the commit/reveal flow on
 /// the DotNS RegistrarController. Signs and submits `commit` then, after the
 /// commitment matures, the payable `register`, and verifies ownership in the

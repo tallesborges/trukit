@@ -6,6 +6,8 @@ use cid::Cid;
 sol! {
     function contenthash(bytes32 node) external view returns (bytes);
     function setContenthash(bytes32 node, bytes hash) external;
+    function text(bytes32 node, string key) external view returns (string);
+    function setText(bytes32 node, string key, string value) external;
 }
 
 /// EIP-137 ENS namehash of a (already normalized) dotted name.
@@ -48,6 +50,30 @@ pub fn encode_set_contenthash_call(node: [u8; 32], contenthash: &[u8]) -> Vec<u8
     setContenthashCall {
         node: node.into(),
         hash: contenthash.to_vec().into(),
+    }
+    .abi_encode()
+}
+
+/// ABI-encode a `text(bytes32 node, string key)` resolver call.
+pub fn encode_text_call(node: [u8; 32], key: &str) -> Vec<u8> {
+    textCall {
+        node: node.into(),
+        key: key.to_string(),
+    }
+    .abi_encode()
+}
+
+/// ABI-decode the `string` returned by a `text` call.
+pub fn decode_text_return(data: &[u8]) -> Result<String> {
+    textCall::abi_decode_returns(data).context("ABI-decoding text return failed")
+}
+
+/// ABI-encode a `setText(bytes32 node, string key, string value)` resolver call.
+pub fn encode_set_text_call(node: [u8; 32], key: &str, value: &str) -> Vec<u8> {
+    setTextCall {
+        node: node.into(),
+        key: key.to_string(),
+        value: value.to_string(),
     }
     .abi_encode()
 }

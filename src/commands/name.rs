@@ -21,6 +21,9 @@ pub enum Cmd {
     /// Read or set a .dot name's raw contenthash record.
     #[command(subcommand)]
     Content(ContentCmd),
+    /// Read or set a .dot name's text records (e.g. manifest, executable).
+    #[command(subcommand)]
+    Text(TextCmd),
 }
 
 #[derive(Subcommand)]
@@ -35,6 +38,26 @@ pub enum ContentCmd {
     /// Read the raw contenthash record of a .dot name (`asset-hub name content <name>`).
     #[command(external_subcommand)]
     Read(Vec<String>),
+}
+
+#[derive(Subcommand)]
+pub enum TextCmd {
+    /// Read a text record (e.g. `asset-hub name text get myapp00 manifest`).
+    Get {
+        /// The .dot name.
+        name: String,
+        /// Record key (e.g. manifest, executable, url).
+        key: String,
+    },
+    /// Set a text record on a .dot name (signed Revive.call).
+    Set {
+        /// The .dot name (must be owned by the signer).
+        name: String,
+        /// Record key (e.g. manifest, executable).
+        key: String,
+        /// Record value.
+        value: String,
+    },
 }
 
 pub async fn run(
@@ -70,6 +93,19 @@ pub async fn run(
         }
         Cmd::Content(ContentCmd::Set { name, cid }) => {
             set(env, &name, &cid, mnemonic, derivation_path).await?;
+        }
+        Cmd::Text(TextCmd::Get { name, key }) => {
+            let name = dotns::normalize_name(&name);
+            let client = chain::asset_hub_client(env).await?;
+            let value = chain::resolve_text(&client, env, &name, &key).await?;
+            if value.is_empty() {
+                println!("no '{key}' text record set for {name}");
+            } else {
+                println!("{value}");
+            }
+        }
+        Cmd::Text(TextCmd::Set { name, key, value }) => {
+            text_set(env, &name, &key, &value, mnemonic, derivation_path).await?;
         }
     }
     Ok(())
@@ -118,5 +154,29 @@ async fn set(
     }
     ui::success(format!("bound {name}"));
     ui::kv("cid", cid);
+    Ok(())
+}
+
+async fn text_set(
+    env: &Env,
+    name: &str,
+    key: &str,
+    value: &str,
+    mnemonic: Option<String>,
+    derivation_path: Option<String>,
+) -> Result<()> {
+    let name = dotns::normalize_name(name);
+    let signer = chain::build_signer(mnemonic.as_deref(), derivation_path.as_deref())?;
+
+    ui::step(format!("set '{key}' on {name}"));
+    let client = chain::asset_hub_client(env).await?;
+    chain::set_text(&client, env, &signer, &name, key, value).await?;
+
+    let onchain = chain::resolve_text(&client, env, &name, key).await?;
+    if onchain != value {
+        bail!("read-back mismatch: set '{value}' but chain has '{onchain}'");
+    }
+    ui::success(format!("set '{key}' on {name}"));
+    ui::kv(key, value);
     Ok(())
 }

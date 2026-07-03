@@ -1,5 +1,6 @@
 use crate::chain;
 use crate::commands::bulletin;
+use crate::config::DeployConfig;
 use crate::dotns;
 use crate::env::Env;
 use crate::merkle;
@@ -21,6 +22,9 @@ pub struct Args {
     /// Merkleize with the Kubo `ipfs` binary instead of the native encoder (fallback).
     #[arg(long)]
     pub kubo: bool,
+    /// Deploy manifest with text records to write (defaults to ./deploy.toml if present).
+    #[arg(long)]
+    pub config: Option<String>,
 }
 
 pub async fn run(
@@ -30,6 +34,7 @@ pub async fn run(
     derivation_path: Option<String>,
 ) -> Result<()> {
     let domain = dotns::normalize_name(&args.domain);
+    let config = DeployConfig::load(args.config.as_deref())?;
 
     let (content_cid, prepared) = match &args.input_car {
         Some(car) => {
@@ -85,6 +90,12 @@ pub async fn run(
             hex::encode(&expected),
             hex::encode(&onchain)
         );
+    }
+
+    for (key, value) in &config.text {
+        ui::step(format!("set '{key}' on {domain}"));
+        chain::set_text(&asset_hub, env, &owner, &domain, key, value).await?;
+        ui::kv(key, ui::ellipsize(value));
     }
 
     let label = domain.strip_suffix(".dot").unwrap_or(&domain);
