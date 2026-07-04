@@ -1,3 +1,21 @@
+//! DotNS RegistrarController + Registry ABI — commit/reveal registration on
+//! Asset Hub via `pallet_revive`.
+//!
+//! Registration gotchas, all learned by decoding on-chain reverts (surfaced by
+//! `chain::revert_reason`):
+//!
+//! - **Label digit rule**: a label must end in *no digits* or *exactly 2 digits*.
+//!   Anything else (e.g. `myapp1` or `myapp1234`) makes `classifyName` revert with
+//!   custom error `0x2dfc7d98` ("Name must have no digit suffix or exactly 2 digit
+//!   suffix"). `register_name` hits this on its first read, before any commit.
+//! - **Commit/reveal timing**: `register` reverts with `CommitmentTooNew`
+//!   (`0x74480cc9`) until the commitment matures. The dry-run evaluates against the
+//!   lagging *finalized* block, so a fixed wall-clock sleep races the chain clock —
+//!   poll the dry-run until it clears instead (see `chain::await_commitment_mature`).
+//! - **Tier vs. availability**: `classifyName` returns `(tier, status)` where
+//!   `status` is a human string like "Available to all"; tier `0` is open, higher
+//!   tiers are PoP-gated (see the `dotns` skill / substrate-chain-toolkit for PoP).
+
 use alloy_primitives::{Address, FixedBytes, U256};
 use alloy_sol_types::{sol, SolCall};
 use anyhow::{Context, Result};

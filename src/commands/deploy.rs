@@ -25,6 +25,9 @@ pub struct Args {
     /// Deploy manifest with text records to write (defaults to ./deploy.toml if present).
     #[arg(long)]
     pub config: Option<String>,
+    /// Register the domain (open-tier) if it isn't already owned by the signer.
+    #[arg(long)]
+    pub register: bool,
 }
 
 pub async fn run(
@@ -35,6 +38,10 @@ pub async fn run(
 ) -> Result<()> {
     let domain = dotns::normalize_name(&args.domain);
     let config = DeployConfig::load(args.config.as_deref())?;
+
+    let owner = chain::build_signer(mnemonic.as_deref(), derivation_path.as_deref())?;
+    let asset_hub = chain::asset_hub_client(env).await?;
+    chain::ensure_domain(&asset_hub, env, &owner, &domain, args.register).await?;
 
     let (content_cid, prepared) = match &args.input_car {
         Some(car) => {
@@ -80,8 +87,6 @@ pub async fn run(
         "bind {domain} → {}",
         ui::ellipsize(&content_cid.to_string())
     ));
-    let owner = chain::build_signer(mnemonic.as_deref(), derivation_path.as_deref())?;
-    let asset_hub = chain::asset_hub_client(env).await?;
     let expected = chain::set_contenthash(&asset_hub, env, &owner, &domain, &content_cid).await?;
     let onchain = chain::resolve_contenthash(&asset_hub, env, &domain).await?;
     if onchain != expected {

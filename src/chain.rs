@@ -880,7 +880,10 @@ pub async fn resolve_contenthash(
         Err(err) => bail!("resolver call failed on chain: {err:?}"),
     };
     if exec.flags.bits & 1 != 0 {
-        bail!("resolver call reverted");
+        bail!(
+            "resolver contenthash call reverted: {}",
+            revert_reason(&exec.data)
+        );
     }
     dotns::decode_contenthash_return(&exec.data)
 }
@@ -934,6 +937,33 @@ pub async fn ensure_mapped(client: &OnlineClient<AssetHubConfig>, signer: &Keypa
     Ok(())
 }
 
+/// Best-effort human-readable reason from EVM revert returndata. Decodes the
+/// standard `Error(string)` / `Panic(uint256)` shapes (and Vyper string reverts);
+/// for a custom error surfaces its 4-byte selector, and for empty returndata
+/// explains the common causes.
+fn revert_reason(data: &[u8]) -> String {
+    if let Some(reason) = alloy_sol_types::decode_revert_reason(data) {
+        return reason;
+    }
+    if data.is_empty() {
+        return "no reason returned (empty revert — often an unmet require() without a message, \
+                an unauthorized caller, or a call to an address with no contract code)"
+            .to_string();
+    }
+    if data.len() >= 4 {
+        let selector = hex::encode(&data[..4]);
+        // Many custom errors are `SomeError(string)`: a 4-byte selector followed
+        // by an ABI-encoded string. Surface that message directly when present.
+        if let Ok(msg) = <String as alloy_sol_types::SolValue>::abi_decode(&data[4..]) {
+            if !msg.is_empty() {
+                return format!("custom error 0x{selector}: {msg:?}");
+            }
+        }
+        return format!("custom error 0x{selector} (returndata 0x{})", hex::encode(data));
+    }
+    format!("unrecognized revert (returndata 0x{})", hex::encode(data))
+}
+
 /// Read-only `ReviveApi.call` dry-run against `dest` with `calldata`, returning
 /// the raw ABI-encoded return data. Rejects on-chain errors and reverts so
 /// callers can treat a successful result as authoritative. Nothing is submitted.
@@ -957,10 +987,10 @@ pub async fn revive_view(
 
     let exec = match outcome.result {
         Ok(exec) => exec,
-        Err(err) => bail!("view call failed on chain: {err:?}"),
+        Err(err) => bail!("contract call failed on chain: {err:?}"),
     };
     if exec.flags.bits & 1 != 0 {
-        bail!("view call reverted");
+        bail!("contract call reverted: {}", revert_reason(&exec.data));
     }
     Ok(exec.data)
 }
@@ -998,15 +1028,12 @@ pub async fn revive_call(
 
     let exec = match outcome.result {
         Ok(exec) => exec,
-        Err(err) => bail!(
-            "dry-run reverted, refusing to submit: {err:?} \
-             (are you the owner of this name and is its resolver set?)"
-        ),
+        Err(err) => bail!("dry-run failed on chain, refusing to submit: {err:?}"),
     };
     if exec.flags.bits & 1 != 0 {
         bail!(
-            "dry-run reverted (revert flag set), refusing to submit \
-             (likely not the domain owner or the resolver is not configured)"
+            "dry-run reverted, refusing to submit: {}",
+            revert_reason(&exec.data)
         );
     }
 
@@ -1083,9 +1110,8 @@ pub async fn set_contenthash(
     Ok(contenthash)
 }
 
-/// Read a `.dot` name's `key` text record by dry-running the resolver's
-/// `text(bytes32,string)` view via `ReviveApi.call`. Returns an empty string
-/// when the record is unset. `name` must be normalized already.
+/// Read a `.dot` name's `key` text record via the resolver's `text(bytes32,string)`
+/// dry-run. Empty string when unset. `name` must be normalized.
 pub async fn resolve_text(
     client: &OnlineClient<AssetHubConfig>,
     env: &Env,
@@ -1101,9 +1127,8 @@ pub async fn resolve_text(
     dotns::decode_text_return(&data)
 }
 
-/// Set a `.dot` name's `key` text record to `value` by submitting a signed
-/// `setText(node, key, value)` to the env's DotNS resolver. Returns the finalized
-/// extrinsic hash. `name` must be normalized already.
+/// Set a `.dot` name's `key` text record via a signed `setText`. Returns the
+/// finalized extrinsic hash. `name` must be normalized.
 pub async fn set_text(
     client: &OnlineClient<AssetHubConfig>,
     env: &Env,
@@ -1119,6 +1144,132 @@ pub async fn set_text(
     let block = revive_call(client, signer, dest, 0, calldata).await?;
     ui::kv("tx", format!("0x{}", hex::encode(block)));
     Ok(block)
+}
+
+/// DotNS Registry owner of a normalized `.dot` `name`, or `None` if unregistered
+/// (ENS `owner(bytes32)` maps unknown nodes to the zero address). Needs `env.registry`.
+pub async fn name_owner(
+    client: &OnlineClient<AssetHubConfig>,
+    env: &Env,
+    name: &str,
+) -> Result<Option<H160>> {
+    let node = dotns::namehash(name);
+    let registry = parse_h160(env.registry)?;
+    let origin = account_id(&build_signer(None, None)?);
+    let data = revive_view(client, origin, registry, 0, registrar::encode_owner(node)).await?;
+    let owner = registrar::decode_owner(&data)?;
+    Ok((owner.0 != [0u8; 20]).then_some(owner))
+}
+
+/// Ensure `signer` owns `name` before a deploy binds to it: proceed if already
+/// theirs; register open-tier when `allow_register` and it's unregistered; error
+/// if it's taken. No-op when the env has no registry (the bind dry-run enforces
+/// ownership instead).
+pub async fn ensure_domain(
+    client: &OnlineClient<AssetHubConfig>,
+    env: &Env,
+    signer: &Keypair,
+    name: &str,
+    allow_register: bool,
+) -> Result<()> {
+    if env.registry.is_empty() {
+        if allow_register {
+            bail!(
+                "--register is not supported on env '{}' (no registrar addresses configured)",
+                env.id
+            );
+        }
+        return Ok(());
+    }
+
+    let ours = revive_address(client, account_id(signer)).await?;
+    match name_owner(client, env, name).await? {
+        Some(owner) if owner.0 == ours.0 => Ok(()),
+        Some(owner) => bail!(
+            "{name} is registered to 0x{} (not you); deploy requires a name you own",
+            hex::encode(owner.0)
+        ),
+        None if !allow_register => {
+            let label = name.strip_suffix(".dot").unwrap_or(name);
+            bail!(
+                "{name} is not registered — run `dotkit asset-hub name register {label}` first, \
+                 or pass --register to register it now (open-tier, costs PAS)"
+            )
+        }
+        None => {
+            let (_, value) = register_name(env, signer, name).await?;
+            ui::success(format!("registered {name} (~{} PAS)", value as f64 / 1e10));
+            Ok(())
+        }
+    }
+}
+
+/// Selector of `CommitmentTooNew(bytes32,uint256,uint256)` — returned by the
+/// registrar's `register` while the commitment is still maturing.
+const COMMITMENT_TOO_NEW: [u8; 4] = [0x74, 0x48, 0x0c, 0xc9];
+/// Give up waiting for a commitment to mature after this long.
+const COMMIT_MATURITY_TIMEOUT: Duration = Duration::from_secs(120);
+/// Delay between `register` dry-run probes while the commitment matures.
+const COMMIT_POLL_INTERVAL: Duration = Duration::from_secs(4);
+
+/// Poll the `register` dry-run until the commitment matures.
+///
+/// A commitment is only valid `minCommitmentAge` seconds after `commit`, but the
+/// dry-run evaluates against the (lagging) finalized block, so a fixed wall-clock
+/// sleep races the on-chain clock and reverts with `CommitmentTooNew`. Re-run the
+/// dry-run until it stops returning that error; a different revert or a chain
+/// error fails immediately, and the whole wait is bounded by a timeout.
+async fn await_commitment_mature(
+    client: &OnlineClient<AssetHubConfig>,
+    origin: AccountId32,
+    registrar: H160,
+    value: u128,
+    register_calldata: &[u8],
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + COMMIT_MATURITY_TIMEOUT;
+    loop {
+        let call = asset_hub::runtime_apis().revive_api().call(
+            origin,
+            registrar,
+            value,
+            None,
+            None,
+            register_calldata.to_vec(),
+        );
+        let outcome = client
+            .at_current_block()
+            .await?
+            .runtime_apis()
+            .call(call)
+            .await
+            .context("register dry-run (ReviveApi.call) failed")?;
+
+        match outcome.result {
+            Ok(exec) if exec.flags.bits & 1 == 0 => {
+                ui::progress_clear();
+                return Ok(());
+            }
+            Ok(exec) if exec.data.starts_with(&COMMITMENT_TOO_NEW) => {
+                if tokio::time::Instant::now() >= deadline {
+                    ui::progress_clear();
+                    bail!(
+                        "commitment still maturing after {}s (chain reports CommitmentTooNew)",
+                        COMMIT_MATURITY_TIMEOUT.as_secs()
+                    );
+                }
+                ui::progress("waiting for commitment to mature…");
+                tokio::time::sleep(COMMIT_POLL_INTERVAL).await;
+            }
+            Ok(exec) => {
+                ui::progress_clear();
+                bail!("register dry-run reverted: {}", revert_reason(&exec.data));
+            }
+            Err(err) => {
+                ui::progress_clear();
+                bail!("register dry-run failed on chain: {err:?}");
+            }
+        }
+    }
 }
 
 /// Register an open-tier `.dot` `name` for `signer` via the commit/reveal flow on
@@ -1206,20 +1357,15 @@ pub async fn register_name(env: &Env, signer: &Keypair, name: &str) -> Result<(H
     )
     .await?;
     let min_age = registrar::decode_min_commitment_age(&age_data)?;
-    let wait = min_age + 6;
-    ui::note(format!("waiting {wait}s for commitment to mature…"));
-    tokio::time::sleep(Duration::from_secs(wait)).await;
 
     ui::step(format!("register {name}"));
     ui::kv("value", format!("{value_native} plancks"));
-    let register_tx = revive_call(
-        &client,
-        signer,
-        registrar,
-        value_native,
-        registrar::encode_register(registrar::registration(&label, owner, secret)),
-    )
-    .await?;
+    let register_calldata = registrar::encode_register(registrar::registration(&label, owner, secret));
+    // A commitment can't be valid before `min_age` seconds — wait that floor,
+    // then poll the dry-run until the lagging finalized clock also agrees.
+    tokio::time::sleep(Duration::from_secs(min_age)).await;
+    await_commitment_mature(&client, origin, registrar, value_native, &register_calldata).await?;
+    let register_tx = revive_call(&client, signer, registrar, value_native, register_calldata).await?;
     ui::kv("tx", format!("0x{}", hex::encode(register_tx)));
 
     let node = dotns::namehash(name);

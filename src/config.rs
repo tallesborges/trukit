@@ -1,28 +1,23 @@
-//! Optional deploy manifest (`deploy.toml`): DotNS metadata written alongside a
-//! deploy. Currently drives text records (e.g. `manifest`, `executable`) set via
-//! the resolver's `setText(node, key, value)`.
+//! Optional `deploy.toml`: DotNS metadata written alongside a deploy. Currently
+//! just text records (e.g. `manifest`, `executable`) set via the resolver.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// Parsed `deploy.toml`. Unknown fields are rejected so typos and unsupported
-/// sections fail loudly rather than silently no-op.
+/// Parsed `deploy.toml`. Unknown fields are rejected so typos fail loudly.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeployConfig {
-    /// Text records to set on the domain, `key -> value`. `BTreeMap` keeps the
-    /// write order stable across runs.
+    /// Text records to set on the domain (`key -> value`); `BTreeMap` for stable order.
     #[serde(default)]
     pub text: BTreeMap<String, String>,
 }
 
 impl DeployConfig {
-    /// Load the deploy config: from `explicit` when given (must exist), otherwise
-    /// auto-detect `./deploy.toml` in the current directory (optional — an absent
-    /// file yields an empty config). The build dir itself is never scanned, since
-    /// its contents get uploaded wholesale.
+    /// Load `deploy.toml` from `explicit` (must exist) or auto-detect `./deploy.toml`
+    /// (absent → empty config). The build dir is never scanned — its files get uploaded.
     pub fn load(explicit: Option<&str>) -> Result<DeployConfig> {
         let path = match explicit {
             Some(p) => Some(PathBuf::from(p)),

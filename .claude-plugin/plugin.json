@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "dotkit",
+  "description": "Deploy static apps to Bulletin and manage DotNS .dot names on Paseo Asset Hub via the dotkit Rust CLI. Bundles the dotkit agent skill.",
+  "author": {
+    "name": "Talles Borges"
+  },
+  "homepage": "https://github.com/tallesborges/dotkit",
+  "repository": "https://github.com/tallesborges/dotkit",
+  "keywords": ["polkadot", "dotns", "bulletin", "deploy", "paseo", "ipfs"]
+}

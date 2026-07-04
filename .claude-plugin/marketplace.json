@@ -1,0 +1,15 @@
+{
+  "name": "dotkit",
+  "owner": {
+    "name": "Talles Borges"
+  },
+  "description": "Marketplace for the dotkit Polkadot deploy CLI and its agent skill.",
+  "plugins": [
+    {
+      "name": "dotkit",
+      "source": "./",
+      "description": "dotkit agent skill: deploy static apps to Bulletin and manage DotNS .dot names on Paseo Asset Hub.",
+      "homepage": "https://github.com/tallesborges/dotkit"
+    }
+  ]
+}
