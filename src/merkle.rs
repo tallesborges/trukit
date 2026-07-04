@@ -55,8 +55,7 @@ pub fn merkleize_dir(dir: &str) -> Result<Merkleized> {
     let mut tree = BufferingTreeBuilder::new(opts);
 
     for (rel, abs) in &files {
-        let data =
-            std::fs::read(abs).with_context(|| format!("reading {}", abs.display()))?;
+        let data = std::fs::read(abs).with_context(|| format!("reading {}", abs.display()))?;
         let (file_cid, total_size) = add_file(&data, &mut seen, &mut raw_blocks)?;
         tree.put_link(rel, file_cid, total_size)
             .map_err(|e| anyhow!("linking {rel} into the directory tree: {e}"))?;
@@ -129,10 +128,7 @@ fn add_file(
     file_blocks.extend(adder.finish());
 
     let total_size: u64 = file_blocks.iter().map(|(_, b)| b.len() as u64).sum();
-    let root = file_blocks
-        .last()
-        .context("file produced no blocks")?
-        .0;
+    let root = file_blocks.last().context("file produced no blocks")?.0;
 
     for (cid, block) in file_blocks {
         if seen.insert(cid) {
@@ -251,7 +247,8 @@ mod tests {
     /// nested `assets/big.bin` larger than one 256 KiB chunk (so the file itself
     /// becomes a balanced dag-pb tree), and a top-level hidden file. Exercises
     /// nesting, multi-chunk files, and `--hidden` inclusion together.
-    const NESTED_MULTICHUNK_V1: &str = "bafybeibqpezse4fw2okd7w2dlbkjsjj5fkyno74lhc5wu4ogmjveh5bc4a";
+    const NESTED_MULTICHUNK_V1: &str =
+        "bafybeibqpezse4fw2okd7w2dlbkjsjj5fkyno74lhc5wu4ogmjveh5bc4a";
 
     #[test]
     fn nested_multichunk_dir_matches_kubo() {
