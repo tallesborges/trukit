@@ -31,7 +31,7 @@ dotkit deploy ./dist myapp.dot
 
 This merkleizes `./dist`, uploads every block to Bulletin, sets the contenthash on `myapp.dot`, and prints the gateway + `https://myapp.paseo.li` URL.
 
-Register an open-tier name first if you need one:
+Register the name first if you need one — or add `--register` to the `deploy` command above to do it in one step:
 
 ```sh
 dotkit asset-hub name register myapp.dot
@@ -48,14 +48,18 @@ dotkit asset-hub name register myapp.dot
 | `asset-hub transfer <dest> <plancks>` | Send native PAS on Asset Hub. |
 | `asset-hub map` | Ensure the signer has an H160 mapping (`Revive.map_account`). |
 | `asset-hub name resolve <name.dot>` | Resolve a name to its contenthash CID. |
-| `asset-hub name register <name.dot>` | Register an open-tier name (commit/reveal) to the signer. |
+| `asset-hub name register <name.dot>` | Register a name (commit/reveal) — open, or Lite/Full with a personhood-verified signer. |
 | `asset-hub name content set <name.dot> <cid>` | Bind a CID to a name's contenthash. |
 | `asset-hub name content <name.dot>` | Read a name's raw contenthash record. |
+| `asset-hub name text set <name.dot> <key> <value>` | Set a text record (e.g. `manifest`, `executable`). |
+| `asset-hub name text get <name.dot> <key>` | Read a text record. |
 | `account env` | Print the resolved environment config. |
 | `account whoami` | Derive the signer and prove Asset Hub + Bulletin connectivity. |
 
 ### `deploy` flags
 
+- `--register` — register the domain first (open, or Lite/Full if the signer is verified) when it isn't already owned.
+- `--config <deploy.toml>` — write text records from a config after the bind (auto-detected as `./deploy.toml`).
 - `--input-car <file>` — deploy a pre-built CAR instead of merkleizing.
 - `--kubo` — merkleize with the external `ipfs` binary instead of the native encoder (fallback).
 
@@ -89,4 +93,4 @@ DOTKIT_COMPARE_DIR=./dist cargo test -- --ignored compare_env
 
 ## Status
 
-The `deploy` MVP is built and live-verified end-to-end on `paseo-next-v2`. Native merkleization (dropping the Kubo shell-out) is complete and golden-tested. Remaining work: config files + text records, non-open register tiers, and a chunked path for single blobs larger than 2 MiB.
+The `deploy` MVP is built and live-verified end-to-end on `paseo-next-v2`, including auto-register (`--register`), Lite/Full personhood-gated registration (with a pre-commit personhood check), text records via `deploy.toml`, native merkleization (golden-tested for byte-exact Kubo parity), reliable commit/reveal, and decoded on-chain revert reasons. Remaining work: a chunked path for single blobs larger than 2 MiB, and full `preview`-env contract addresses.
