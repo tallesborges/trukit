@@ -802,6 +802,35 @@ pub async fn store_block(
     Ok(StoreOutcome::Stored { block, index })
 }
 
+/// Authorize `who` for Bulletin `TransactionStorage` with a `transactions`/`bytes`
+/// quota, submitting a signed `authorize_account` extrinsic. The `signer` must
+/// hold Authorizer privileges on the chain, else the extrinsic fails with
+/// `BadOrigin` (surfaced to the caller). Returns the finalized extrinsic hash.
+pub async fn authorize_bulletin_account(
+    client: &OnlineClient<BulletinConfig>,
+    signer: &Keypair,
+    who: AccountId32,
+    transactions: u32,
+    bytes: u64,
+) -> Result<[u8; 32]> {
+    let call = bulletin::tx()
+        .transaction_storage()
+        .authorize_account(who, transactions, bytes);
+    let events = client
+        .tx()
+        .await?
+        .sign_and_submit_then_watch_default(&call, signer)
+        .await
+        .context("submitting TransactionStorage.authorize_account")?
+        .wait_for_finalized_success()
+        .await
+        .context(
+            "authorize_account did not finalize successfully \
+             (the signer must hold Bulletin Authorizer privileges)",
+        )?;
+    Ok(events.extrinsic_hash().0)
+}
+
 /// Standard Substrate dev phrase. Its base account (empty derivation) is the
 /// shared dev-mode DotNS owner on testnets; derived sub-accounts form the
 /// authorized Bulletin storage pool.
@@ -959,7 +988,10 @@ fn revert_reason(data: &[u8]) -> String {
                 return format!("custom error 0x{selector}: {msg:?}");
             }
         }
-        return format!("custom error 0x{selector} (returndata 0x{})", hex::encode(data));
+        return format!(
+            "custom error 0x{selector} (returndata 0x{})",
+            hex::encode(data)
+        );
     }
     format!("unrecognized revert (returndata 0x{})", hex::encode(data))
 }
@@ -1161,6 +1193,188 @@ pub async fn name_owner(
     Ok((owner.0 != [0u8; 20]).then_some(owner))
 }
 
+/// Classify a `.dot` `name` via the PoP rules' `classifyName`, returning the
+/// required personhood `(tier, status)` where `status` is a human availability
+/// string. Reverts (surfaced to the caller) for labels that break the digit-suffix
+/// rule. `name` may be with or without the `.dot` suffix.
+pub async fn classify_name(
+    client: &OnlineClient<AssetHubConfig>,
+    env: &Env,
+    name: &str,
+) -> Result<(u8, String)> {
+    let label = name.strip_suffix(".dot").unwrap_or(name);
+    let pop_rules = parse_h160(env.pop_rules)?;
+    let origin = account_id(&build_signer(None, None)?);
+    let data = revive_view(
+        client,
+        origin,
+        pop_rules,
+        0,
+        registrar::encode_classify_name(label),
+    )
+    .await?;
+    registrar::decode_classify(&data)
+}
+
+/// The base list price (native plancks, no registration margin) of a `.dot`
+/// `name` for `owner`, via the PoP rules' `priceWithoutCheck`. `name` may carry
+/// the `.dot` suffix or not.
+pub async fn name_price_native(
+    client: &OnlineClient<AssetHubConfig>,
+    env: &Env,
+    name: &str,
+    owner: H160,
+) -> Result<u128> {
+    let label = name.strip_suffix(".dot").unwrap_or(name);
+    let pop_rules = parse_h160(env.pop_rules)?;
+    let origin = account_id(&build_signer(None, None)?);
+    let data = revive_view(
+        client,
+        origin,
+        pop_rules,
+        0,
+        registrar::encode_price(label, owner),
+    )
+    .await?;
+    registrar::base_price_native(registrar::decode_price(&data)?)
+}
+
+/// Native (PAS) free + reserved balance of `account` on Asset Hub, read from
+/// `System.Account`. Zero when the account has no on-chain record yet.
+pub async fn account_balance(
+    client: &OnlineClient<AssetHubConfig>,
+    account: AccountId32,
+) -> Result<(u128, u128)> {
+    let at = client.at_current_block().await?;
+    let info = at
+        .storage()
+        .try_fetch(asset_hub::storage().system().account(), (account,))
+        .await
+        .context("reading System.Account")?;
+    match info {
+        Some(value) => {
+            let account = value.decode().context("decoding AccountInfo")?;
+            Ok((account.data.free, account.data.reserved))
+        }
+        None => Ok((0, 0)),
+    }
+}
+
+/// Resolve a transfer recipient given as either a `0x`-prefixed H160 or an SS58
+/// address (mapped to its H160 via `ReviveApi.address`).
+async fn resolve_recipient(client: &OnlineClient<AssetHubConfig>, to: &str) -> Result<H160> {
+    let to = to.trim();
+    if to.starts_with("0x") && to.len() == 42 {
+        return parse_h160(to);
+    }
+    let account = AccountId32::from_str(to).map_err(|e| {
+        anyhow::anyhow!("recipient '{to}' is neither a 0x H160 nor a valid SS58 address: {e}")
+    })?;
+    revive_address(client, account).await
+}
+
+/// Outcome of a name-NFT transfer.
+pub struct TransferOutcome {
+    pub from: H160,
+    pub to: H160,
+    pub fee_native: u128,
+    pub tx: [u8; 32],
+}
+
+/// Transfer the `.dot` `name` (an ERC721 on the DotNS Registrar) from the signer
+/// to `to_raw` (a `0x` H160 or an SS58 address). Prechecks NFT ownership so we
+/// fail before spending fees, quotes the friction fee (0 for same-tier/upward
+/// moves) and pays it as the payable `transferFrom` call value, then verifies
+/// `ownerOf` flipped to the recipient. `name` must be normalized.
+pub async fn transfer_name(
+    env: &Env,
+    signer: &Keypair,
+    name: &str,
+    to_raw: &str,
+) -> Result<TransferOutcome> {
+    if env.registrar.is_empty() {
+        bail!(
+            "name transfer is not supported on env '{}' (no registrar NFT address configured)",
+            env.id
+        );
+    }
+    let registrar = parse_h160(env.registrar)?;
+    let client = asset_hub_client(env).await?;
+    ensure_mapped(&client, signer).await?;
+
+    let origin = account_id(signer);
+    let from = revive_address(&client, origin).await?;
+    let to = resolve_recipient(&client, to_raw).await?;
+    let token_id = registrar::token_id(dotns::namehash(name));
+
+    let owner_data = revive_view(
+        &client,
+        origin,
+        registrar,
+        0,
+        registrar::encode_owner_of(token_id),
+    )
+    .await?;
+    let current = registrar::decode_owner_of(&owner_data)?;
+    if current.0 == [0u8; 20] {
+        bail!("{name} is not registered (no name NFT minted); nothing to transfer");
+    }
+    if current.0 != from.0 {
+        bail!(
+            "{name} is owned by 0x{} (not you); only the owner can transfer it",
+            hex::encode(current.0)
+        );
+    }
+    if to.0 == from.0 {
+        bail!(
+            "refusing to transfer {name} to its current owner (0x{})",
+            hex::encode(to.0)
+        );
+    }
+
+    let fee_data = revive_view(
+        &client,
+        origin,
+        registrar,
+        0,
+        registrar::encode_quote_transfer_fee(token_id, to),
+    )
+    .await?;
+    let fee_native = registrar::fee_value_native(registrar::decode_quote_transfer_fee(&fee_data)?)?;
+
+    ui::step(format!("transfer {name} → 0x{}", hex::encode(to.0)));
+    if fee_native > 0 {
+        ui::kv("fee", format!("{fee_native} plancks"));
+    }
+    let calldata = registrar::encode_transfer_from(from, to, token_id);
+    let tx = revive_call(&client, signer, registrar, fee_native, calldata).await?;
+    ui::kv("tx", format!("0x{}", hex::encode(tx)));
+
+    let after_data = revive_view(
+        &client,
+        origin,
+        registrar,
+        0,
+        registrar::encode_owner_of(token_id),
+    )
+    .await?;
+    let after = registrar::decode_owner_of(&after_data)?;
+    if after.0 != to.0 {
+        bail!(
+            "transfer submitted but ownerOf is still 0x{} (expected 0x{})",
+            hex::encode(after.0),
+            hex::encode(to.0)
+        );
+    }
+
+    Ok(TransferOutcome {
+        from,
+        to,
+        fee_native,
+        tx,
+    })
+}
+
 /// Ensure `signer` owns `name` before a deploy binds to it: proceed if already
 /// theirs; register open-tier when `allow_register` and it's unregistered; error
 /// if it's taken. No-op when the env has no registry (the bind dry-run enforces
@@ -1276,7 +1490,7 @@ async fn await_commitment_mature(
 const PERSONHOOD_PRECOMPILE: &str = "0x000000000000000000000000000000000a010000";
 
 /// Human name for a personhood tier byte (matches DotNS `PopStatus`).
-fn tier_name(tier: u8) -> &'static str {
+pub fn tier_name(tier: u8) -> &'static str {
     match tier {
         0 => "NoStatus",
         1 => "Lite",
@@ -1406,12 +1620,14 @@ pub async fn register_name(env: &Env, signer: &Keypair, name: &str) -> Result<(H
 
     ui::step(format!("register {name}"));
     ui::kv("value", format!("{value_native} plancks"));
-    let register_calldata = registrar::encode_register(registrar::registration(&label, owner, secret));
+    let register_calldata =
+        registrar::encode_register(registrar::registration(&label, owner, secret));
     // A commitment can't be valid before `min_age` seconds — wait that floor,
     // then poll the dry-run until the lagging finalized clock also agrees.
     tokio::time::sleep(Duration::from_secs(min_age)).await;
     await_commitment_mature(&client, origin, registrar, value_native, &register_calldata).await?;
-    let register_tx = revive_call(&client, signer, registrar, value_native, register_calldata).await?;
+    let register_tx =
+        revive_call(&client, signer, registrar, value_native, register_calldata).await?;
     ui::kv("tx", format!("0x{}", hex::encode(register_tx)));
 
     let node = dotns::namehash(name);

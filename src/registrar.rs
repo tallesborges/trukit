@@ -46,6 +46,10 @@ sol! {
 
     function owner(bytes32 node) external view returns (address);
 
+    function ownerOf(uint256 tokenId) external view returns (address);
+    function quoteTransferFee(uint256 tokenId, address to) external view returns (uint256);
+    function transferFrom(address from, address to, uint256 tokenId) external payable;
+
     struct PersonhoodInfo {
         uint8 status;
         bytes32 contextAlias;
@@ -83,6 +87,13 @@ pub fn encode_classify_name(label: &str) -> Vec<u8> {
 pub fn decode_classify_status(data: &[u8]) -> Result<u8> {
     let ret = classifyNameCall::abi_decode_returns(data).context("decoding classifyName return")?;
     Ok(ret._0)
+}
+
+/// Decode `classifyName` -> `(tier, status)` where `status` is the human-readable
+/// availability string (e.g. "Available to all"). Used by the `name lookup` view.
+pub fn decode_classify(data: &[u8]) -> Result<(u8, String)> {
+    let ret = classifyNameCall::abi_decode_returns(data).context("decoding classifyName return")?;
+    Ok((ret._0, ret._1))
 }
 
 pub fn encode_price(label: &str, owner: H160) -> Vec<u8> {
@@ -144,6 +155,49 @@ pub fn decode_owner(data: &[u8]) -> Result<H160> {
     Ok(to_h160(ret))
 }
 
+/// The ERC721 tokenId of a name is `uint256(namehash(name))` — the same node
+/// hash the Registry keys by, reinterpreted big-endian as a 256-bit integer.
+pub fn token_id(node: [u8; 32]) -> U256 {
+    U256::from_be_bytes(node)
+}
+
+/// ABI-encode `ownerOf(uint256 tokenId)` on the DotNS Registrar (name NFT).
+pub fn encode_owner_of(token_id: U256) -> Vec<u8> {
+    ownerOfCall { tokenId: token_id }.abi_encode()
+}
+
+/// Decode `ownerOf` -> the current name-NFT holder (zero address if unminted).
+pub fn decode_owner_of(data: &[u8]) -> Result<H160> {
+    let ret = ownerOfCall::abi_decode_returns(data).context("decoding Registrar.ownerOf")?;
+    Ok(to_h160(ret))
+}
+
+/// ABI-encode `quoteTransferFee(uint256 tokenId, address to)` — the friction fee
+/// (in 18-decimal wei) the Registrar charges to move `tokenId` to `to`.
+pub fn encode_quote_transfer_fee(token_id: U256, to: H160) -> Vec<u8> {
+    quoteTransferFeeCall {
+        tokenId: token_id,
+        to: to_address(to),
+    }
+    .abi_encode()
+}
+
+/// Decode `quoteTransferFee` -> the required fee in 18-decimal EVM wei.
+pub fn decode_quote_transfer_fee(data: &[u8]) -> Result<U256> {
+    quoteTransferFeeCall::abi_decode_returns(data).context("decoding quoteTransferFee")
+}
+
+/// ABI-encode `transferFrom(address from, address to, uint256 tokenId)` — the
+/// payable name-NFT transfer; the friction fee is sent as the call value.
+pub fn encode_transfer_from(from: H160, to: H160, token_id: U256) -> Vec<u8> {
+    transferFromCall {
+        from: to_address(from),
+        to: to_address(to),
+        tokenId: token_id,
+    }
+    .abi_encode()
+}
+
 /// ABI-encode `personhoodStatus(account, context)` on the personhood precompile.
 pub fn encode_personhood_status(account: H160, context: [u8; 32]) -> Vec<u8> {
     personhoodStatusCall {
@@ -171,6 +225,23 @@ pub fn register_value_native(price_wei: U256) -> Result<u128> {
     u128::try_from(native).context("register value overflows u128")
 }
 
+/// Convert an 18-decimal EVM wei fee (e.g. `quoteTransferFee`) into native
+/// plancks, ceiling the 1e8 wei→native division so we never underpay and trip
+/// `TransferFeeRequired`. No margin — the quote is already the exact fee.
+pub fn fee_value_native(fee_wei: U256) -> Result<u128> {
+    let ratio = U256::from(100_000_000u64);
+    let native = (fee_wei + ratio - U256::from(1u64)) / ratio;
+    u128::try_from(native).context("transfer fee overflows u128")
+}
+
+/// Convert an 18-decimal EVM wei price into native plancks (floored, no margin) —
+/// the base "list price" shown by `name lookup`, distinct from the payable
+/// [`register_value_native`] which adds the contract's +10% registration margin.
+pub fn base_price_native(price_wei: U256) -> Result<u128> {
+    let native = price_wei / U256::from(100_000_000u64);
+    u128::try_from(native).context("price overflows u128")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,6 +250,25 @@ mod tests {
     fn value_conversion_candidate() {
         let price_wei = U256::from(10_000_000_000_000_000_000u128);
         assert_eq!(register_value_native(price_wei).unwrap(), 110_000_000_000);
+    }
+
+    #[test]
+    fn fee_conversion_ceils() {
+        // 1 PAS fee = 1e8 wei exactly -> 1 planck.
+        assert_eq!(fee_value_native(U256::from(100_000_000u64)).unwrap(), 1);
+        // Sub-planck dust ceils up so we never underpay TransferFeeRequired.
+        assert_eq!(fee_value_native(U256::from(1u64)).unwrap(), 1);
+        assert_eq!(fee_value_native(U256::from(0u64)).unwrap(), 0);
+    }
+
+    #[test]
+    fn token_id_is_namehash_be() {
+        let node = [
+            0x99, 0xbc, 0x92, 0xdb, 0x90, 0x0d, 0xea, 0xaf, 0xbb, 0xe9, 0xbc, 0xc9, 0x8e, 0x6f,
+            0xca, 0x31, 0x63, 0x02, 0x51, 0x52, 0x20, 0xc2, 0x72, 0x9a, 0x86, 0x1d, 0x59, 0x0c,
+            0xc6, 0xb1, 0x92, 0x6a,
+        ];
+        assert_eq!(token_id(node), U256::from_be_bytes(node));
     }
 
     #[test]
@@ -191,6 +281,9 @@ mod tests {
         assert_eq!(hex::encode(registerCall::SELECTOR), "b26675d5");
         assert_eq!(hex::encode(ownerCall::SELECTOR), "02571be3");
         assert_eq!(hex::encode(personhoodStatusCall::SELECTOR), "886af133");
+        // Standard ERC721 selectors on the name-NFT Registrar.
+        assert_eq!(hex::encode(ownerOfCall::SELECTOR), "6352211e");
+        assert_eq!(hex::encode(transferFromCall::SELECTOR), "23b872dd");
     }
 
     #[test]

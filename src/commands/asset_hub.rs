@@ -36,19 +36,33 @@ pub async fn run(
             let tx = chain::transfer_keep_alive(env, &signer, dest, plancks)
                 .await
                 .context("transfer failed")?;
-            ui::success(format!("transferred {plancks} plancks"));
-            ui::kv("from", chain::account_id(&signer));
-            ui::kv("to", dest);
-            ui::kv("tx", format!("0x{}", hex::encode(tx)));
+            if ui::json() {
+                ui::emit(&serde_json::json!({
+                    "from": chain::account_id(&signer).to_string(),
+                    "to": dest.to_string(),
+                    "plancks": plancks,
+                    "tx": format!("0x{}", hex::encode(tx)),
+                }));
+            } else {
+                ui::success(format!("transferred {plancks} plancks"));
+                ui::kv("from", chain::account_id(&signer));
+                ui::kv("to", dest);
+                ui::kv("tx", format!("0x{}", hex::encode(tx)));
+            }
         }
         Cmd::Map => {
             let signer = chain::build_signer(mnemonic.as_deref(), derivation_path.as_deref())?;
             let client = chain::asset_hub_client(env).await?;
             chain::ensure_mapped(&client, &signer).await?;
-            ui::success(format!(
-                "account {} is mapped on Asset Hub",
-                chain::account_id(&signer)
-            ));
+            let account = chain::account_id(&signer);
+            if ui::json() {
+                ui::emit(&serde_json::json!({
+                    "account": account.to_string(),
+                    "mapped": true,
+                }));
+            } else {
+                ui::success(format!("account {account} is mapped on Asset Hub"));
+            }
         }
         Cmd::Name(cmd) => super::name::run(env, cmd, mnemonic, derivation_path).await?,
     }

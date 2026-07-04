@@ -30,6 +30,10 @@ struct Cli {
     #[arg(short, long, global = true)]
     quiet: bool,
 
+    /// Emit a single machine-readable JSON object per command instead of human output.
+    #[arg(long, global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -60,6 +64,7 @@ async fn main() {
 async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     ui::set_quiet(cli.quiet);
+    ui::set_json(cli.json);
     let env = env::Env::resolve(&cli.env)?;
     match cli.command {
         Command::Deploy(args) => {

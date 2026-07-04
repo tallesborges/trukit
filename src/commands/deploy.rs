@@ -104,11 +104,21 @@ pub async fn run(
     }
 
     let label = domain.strip_suffix(".dot").unwrap_or(&domain);
-    println!();
-    ui::success(format!("deployed {domain}"));
-    ui::kv("content", content_cid);
-    if !env.web_gateway.is_empty() {
-        ui::kv("url", format!("https://{label}.{}", env.web_gateway));
+    let url = (!env.web_gateway.is_empty()).then(|| format!("https://{label}.{}", env.web_gateway));
+    if ui::json() {
+        ui::emit(&serde_json::json!({
+            "domain": domain,
+            "content": content_cid.to_string(),
+            "url": url,
+            "blocks": { "stored": stored.stored, "skipped": stored.skipped },
+        }));
+    } else {
+        println!();
+        ui::success(format!("deployed {domain}"));
+        ui::kv("content", content_cid);
+        if let Some(url) = url {
+            ui::kv("url", url);
+        }
     }
     Ok(())
 }

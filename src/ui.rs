@@ -12,6 +12,7 @@ use anstyle::{AnsiColor, Style};
 const KEY_WIDTH: usize = 10;
 
 static QUIET: AtomicBool = AtomicBool::new(false);
+static JSON: AtomicBool = AtomicBool::new(false);
 
 /// Suppress informational output (step/success/kv/note/progress). Errors are
 /// always shown regardless. Set once from the global `--quiet` flag.
@@ -19,8 +20,30 @@ pub fn set_quiet(quiet: bool) {
     QUIET.store(quiet, Ordering::Relaxed);
 }
 
+/// Switch to machine-readable JSON mode: all human step/success/kv/note/progress
+/// lines are suppressed and each command instead prints a single JSON object via
+/// [`emit`]. Set once from the global `--json` flag.
+pub fn set_json(json: bool) {
+    JSON.store(json, Ordering::Relaxed);
+}
+
+/// Whether `--json` output mode is active.
+pub fn json() -> bool {
+    JSON.load(Ordering::Relaxed)
+}
+
+/// Human output is silenced by both `--quiet` and `--json`.
 fn quiet() -> bool {
-    QUIET.load(Ordering::Relaxed)
+    QUIET.load(Ordering::Relaxed) || JSON.load(Ordering::Relaxed)
+}
+
+/// Print a single compact JSON object to stdout when `--json` is active; a no-op
+/// otherwise. Commands call this with their result so `--json` yields exactly one
+/// machine-readable line and nothing else.
+pub fn emit(value: &serde_json::Value) {
+    if json() {
+        println!("{value}");
+    }
 }
 
 const STEP: Style = AnsiColor::Cyan.on_default().bold();
@@ -81,8 +104,18 @@ pub fn progress_clear() {
     let _ = std::io::stderr().flush();
 }
 
-/// A red `✗` error header on stderr, followed by the dim cause chain.
+/// A red `✗` error header on stderr, followed by the dim cause chain. In JSON
+/// mode a single `{"error": "..."}` object is printed to stderr instead.
 pub fn error(err: &anyhow::Error) {
+    if json() {
+        let msg = err
+            .chain()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(": ");
+        eprintln!("{}", serde_json::json!({ "error": msg }));
+        return;
+    }
     anstream::eprintln!("{ERR}✗{ERR:#} {err}");
     for cause in err.chain().skip(1) {
         anstream::eprintln!("  {DIM}↳{DIM:#} {cause}");

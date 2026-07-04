@@ -45,16 +45,22 @@ dotkit asset-hub name register myapp.dot
 | `bulletin store <file>` | Store a single blob (≤2 MiB) on Bulletin. |
 | `bulletin store-car <file.car>` | Store every block of a CARv1 so its root resolves. |
 | `bulletin status [--address <ss58>]` | Show authorization / quota for an account. |
+| `bulletin verify <cid>` | Check a CID actually resolves on the env's IPFS gateway (live HTTP probe). |
+| `bulletin authorize [--address <ss58>] [--transactions N] [--bytes N]` | Grant an account Bulletin storage quota (signer needs Authorizer privileges). |
 | `asset-hub transfer <dest> <plancks>` | Send native PAS on Asset Hub. |
 | `asset-hub map` | Ensure the signer has an H160 mapping (`Revive.map_account`). |
 | `asset-hub name resolve <name.dot>` | Resolve a name to its contenthash CID. |
+| `asset-hub name owner-of <name.dot>` | Show whether a name is registered and who owns it. |
+| `asset-hub name lookup <name.dot>` | Read-only overview: owner, required tier + status, base price, contenthash. |
 | `asset-hub name register <name.dot>` | Register a name (commit/reveal) — open, or Lite/Full with a personhood-verified signer. |
+| `asset-hub name transfer <name.dot> <to>` | Transfer a name you own to `<to>` (0x H160 or SS58); pays the quoted friction fee. |
 | `asset-hub name content set <name.dot> <cid>` | Bind a CID to a name's contenthash. |
 | `asset-hub name content <name.dot>` | Read a name's raw contenthash record. |
 | `asset-hub name text set <name.dot> <key> <value>` | Set a text record (e.g. `manifest`, `executable`). |
 | `asset-hub name text get <name.dot> <key>` | Read a text record. |
 | `account env` | Print the resolved environment config. |
 | `account whoami` | Derive the signer and prove Asset Hub + Bulletin connectivity. |
+| `account info` | Show the signer's Asset Hub native (PAS) balance. |
 
 ### `deploy` flags
 
@@ -69,6 +75,7 @@ dotkit asset-hub name register myapp.dot
 - `--mnemonic <phrase>` — signer mnemonic. Falls back to `$MNEMONIC`, then `$DOTNS_MNEMONIC`; defaults to a shared dev account on testnets.
 - `--derivation-path <path>` — Substrate derivation path (e.g. `//Alice`).
 - `-q`, `--quiet` — suppress step/detail output; only errors are printed (useful in CI/scripts).
+- `--json` — emit one machine-readable JSON object per command instead of human output; on failure prints `{"error": …}` to stderr.
 
 ## Environments
 
