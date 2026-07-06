@@ -90,7 +90,7 @@ pub async fn run(
         Cmd::Resolve { name } => {
             let name = dotns::normalize_name(&name);
             let client = chain::asset_hub_client(env).await?;
-            let contenthash = chain::resolve_contenthash(&client, env, &name).await?;
+            let contenthash = dotns::resolve_contenthash(&client, env, &name).await?;
             let cid = if contenthash.is_empty() {
                 None
             } else {
@@ -121,7 +121,7 @@ pub async fn run(
             let raw = args.first().context("usage: name content <name>")?;
             let name = dotns::normalize_name(raw);
             let client = chain::asset_hub_client(env).await?;
-            let contenthash = chain::resolve_contenthash(&client, env, &name).await?;
+            let contenthash = dotns::resolve_contenthash(&client, env, &name).await?;
             let hex = (!contenthash.is_empty()).then(|| format!("0x{}", hex::encode(&contenthash)));
             if ui::json() {
                 ui::emit(&json!({ "name": name, "contenthash": hex }));
@@ -138,7 +138,7 @@ pub async fn run(
         Cmd::Text(TextCmd::Get { name, key }) => {
             let name = dotns::normalize_name(&name);
             let client = chain::asset_hub_client(env).await?;
-            let value = chain::resolve_text(&client, env, &name, &key).await?;
+            let value = dotns::resolve_text(&client, env, &name, &key).await?;
             if ui::json() {
                 ui::emit(&json!({ "name": name, "key": key, "value": value }));
             } else if value.is_empty() {
@@ -157,7 +157,7 @@ pub async fn run(
 async fn owner_of(env: &Env, name: &str) -> Result<()> {
     let name = dotns::normalize_name(name);
     let client = chain::asset_hub_client(env).await?;
-    let owner = chain::name_owner(&client, env, &name).await?;
+    let owner = dotns::name_owner(&client, env, &name).await?;
     let owner_hex = owner.map(|o| format!("0x{}", hex::encode(o.0)));
 
     if ui::json() {
@@ -183,10 +183,10 @@ async fn lookup(env: &Env, name: &str) -> Result<()> {
     let name = dotns::normalize_name(name);
     let client = chain::asset_hub_client(env).await?;
 
-    let owner = chain::name_owner(&client, env, &name).await?;
+    let owner = dotns::name_owner(&client, env, &name).await?;
     let owner_hex = owner.map(|o| format!("0x{}", hex::encode(o.0)));
 
-    let contenthash = chain::resolve_contenthash(&client, env, &name).await?;
+    let contenthash = dotns::resolve_contenthash(&client, env, &name).await?;
     let cid = if contenthash.is_empty() {
         None
     } else {
@@ -195,14 +195,14 @@ async fn lookup(env: &Env, name: &str) -> Result<()> {
 
     // Classification (required PoP tier + human status) reverts for labels that
     // break the digit-suffix rule; treat that as "unavailable" rather than fatal.
-    let classify = chain::classify_name(&client, env, &name).await.ok();
+    let classify = dotns::classify_name(&client, env, &name).await.ok();
     let (tier, status) = match &classify {
         Some((tier, status)) => (Some(*tier), Some(status.clone())),
         None => (None, None),
     };
 
     // Base list price for a fresh registrant (zero owner ⇒ no discount); best-effort.
-    let price = chain::name_price_native(&client, env, &name, H160([0u8; 20]))
+    let price = dotns::name_price_native(&client, env, &name, H160([0u8; 20]))
         .await
         .ok();
 
@@ -212,7 +212,7 @@ async fn lookup(env: &Env, name: &str) -> Result<()> {
             "registered": owner.is_some(),
             "owner": owner_hex,
             "required_tier": tier,
-            "tier_name": tier.map(chain::tier_name),
+            "tier_name": tier.map(dotns::tier_name),
             "status": status,
             "price_pas": price.map(|p| p as f64 / 1e10),
             "cid": cid,
@@ -227,7 +227,7 @@ async fn lookup(env: &Env, name: &str) -> Result<()> {
             None => ui::kv("registered", "no (available)"),
         }
         if let Some(tier) = tier {
-            ui::kv("tier", format!("{} ({tier})", chain::tier_name(tier)));
+            ui::kv("tier", format!("{} ({tier})", dotns::tier_name(tier)));
         }
         if let Some(status) = &status {
             ui::kv("status", status);
@@ -249,7 +249,7 @@ async fn register(
     let name = dotns::normalize_name(name);
     let signer = chain::build_signer(mnemonic.as_deref(), derivation_path.as_deref())?;
 
-    let (owner, value_native) = chain::register_name(env, &signer, &name).await?;
+    let (owner, value_native) = dotns::register_name(env, &signer, &name).await?;
     let cost_pas = value_native as f64 / 1e10;
     if ui::json() {
         ui::emit(&json!({
@@ -276,7 +276,7 @@ async fn transfer(
     let name = dotns::normalize_name(name);
     let signer = chain::build_signer(mnemonic.as_deref(), derivation_path.as_deref())?;
 
-    let outcome = chain::transfer_name(env, &signer, &name, to).await?;
+    let outcome = dotns::transfer_name(env, &signer, &name, to).await?;
     let fee_pas = outcome.fee_native as f64 / 1e10;
     if ui::json() {
         ui::emit(&json!({
@@ -308,9 +308,9 @@ async fn set(
 
     ui::step(format!("bind {name} → {}", ui::ellipsize(&cid.to_string())));
     let client = chain::asset_hub_client(env).await?;
-    let expected = chain::set_contenthash(&client, env, &signer, &name, &cid).await?;
+    let expected = dotns::set_contenthash(&client, env, &signer, &name, &cid).await?;
 
-    let onchain = chain::resolve_contenthash(&client, env, &name).await?;
+    let onchain = dotns::resolve_contenthash(&client, env, &name).await?;
     if onchain != expected {
         bail!(
             "read-back mismatch: set 0x{} but chain has 0x{}",
@@ -340,9 +340,9 @@ async fn text_set(
 
     ui::step(format!("set '{key}' on {name}"));
     let client = chain::asset_hub_client(env).await?;
-    chain::set_text(&client, env, &signer, &name, key, value).await?;
+    dotns::set_text(&client, env, &signer, &name, key, value).await?;
 
-    let onchain = chain::resolve_text(&client, env, &name, key).await?;
+    let onchain = dotns::resolve_text(&client, env, &name, key).await?;
     if onchain != value {
         bail!("read-back mismatch: set '{value}' but chain has '{onchain}'");
     }

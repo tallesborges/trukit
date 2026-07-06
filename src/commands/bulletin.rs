@@ -1,18 +1,15 @@
-use crate::chain::{self, bulletin, BulletinConfig, DEV_PHRASE};
+use crate::bulletin;
+use crate::chain;
+use crate::chain::config::bulletin as bulletin_rt;
 use crate::env::Env;
 use crate::ui;
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
-use rand::Rng;
 use serde_json::json;
 use std::str::FromStr;
 use std::time::Duration;
 use subxt::utils::AccountId32;
-use subxt::OnlineClient;
 use subxt_signer::sr25519::Keypair;
-
-/// Chain-enforced `MaxTransactionSize` (2 MiB).
-const MAX_TRANSACTION_SIZE: usize = 2 * 1024 * 1024;
 
 /// How long to wait for the IPFS gateway to serve a CID during `verify`.
 const GATEWAY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -79,15 +76,8 @@ pub async fn run(
 fn resolve_signer(mnemonic: Option<String>, derivation_path: Option<String>) -> Result<Keypair> {
     match mnemonic {
         Some(phrase) => chain::build_signer(Some(&phrase), derivation_path.as_deref()),
-        None => pool_signer(),
+        None => chain::pool_signer(),
     }
-}
-
-/// A random authorized account from the shared Bulletin storage pool, spreading
-/// load and cutting nonce contention across concurrent deploys.
-pub fn pool_signer() -> Result<Keypair> {
-    let n = rand::thread_rng().gen_range(0u32..=9);
-    chain::build_signer(Some(DEV_PHRASE), Some(&format!("//deploy/{n}")))
 }
 
 async fn status(
@@ -102,10 +92,12 @@ async fn status(
         None => chain::account_id(&resolve_signer(mnemonic, derivation_path)?),
     };
 
-    let client = chain::bulletin_client(env).await?;
+    let client = bulletin::bulletin_client(env).await?;
 
-    let scope = bulletin::runtime_types::pallet_bulletin_transaction_storage::types::AuthorizationScope::Account(account);
-    let address = bulletin::storage().transaction_storage().authorizations();
+    let scope = bulletin_rt::runtime_types::pallet_bulletin_transaction_storage::types::AuthorizationScope::Account(account);
+    let address = bulletin_rt::storage()
+        .transaction_storage()
+        .authorizations();
     let at = client.at_current_block().await?;
     let authorization = at
         .storage()
@@ -217,9 +209,10 @@ async fn authorize(
         None => chain::account_id(&signer),
     };
 
-    let client = chain::bulletin_client(env).await?;
+    let client = bulletin::bulletin_client(env).await?;
     ui::step(format!("authorize {who}"));
-    let tx = chain::authorize_bulletin_account(&client, &signer, who, transactions, bytes).await?;
+    let tx =
+        bulletin::authorize_bulletin_account(&client, &signer, who, transactions, bytes).await?;
 
     if ui::json() {
         ui::emit(&json!({
@@ -244,22 +237,23 @@ async fn store(
     derivation_path: Option<String>,
 ) -> Result<()> {
     let data = std::fs::read(&path).with_context(|| format!("reading file {path}"))?;
-    if data.len() > MAX_TRANSACTION_SIZE {
+    if data.len() > bulletin::MAX_TRANSACTION_SIZE {
         bail!(
-            "file {path} is {} bytes, exceeding the chain's MaxTransactionSize of {MAX_TRANSACTION_SIZE} bytes (2 MiB)",
-            data.len()
+            "file {path} is {} bytes, exceeding the chain's MaxTransactionSize of {} bytes (2 MiB)",
+            data.len(),
+            bulletin::MAX_TRANSACTION_SIZE
         );
     }
 
-    let cid = chain::raw_cid(&data);
+    let cid = bulletin::raw_cid(&data);
     let gateway_url = format!("{}/ipfs/{cid}", env.ipfs_gateway);
 
-    let client = chain::bulletin_client(env).await?;
+    let client = bulletin::bulletin_client(env).await?;
     let signer = resolve_signer(mnemonic, derivation_path)?;
 
-    let (stored, block, index) = match chain::store_block(&client, &signer, 0x55, &data).await? {
-        chain::StoreOutcome::AlreadyPresent { block, index } => (false, block, index),
-        chain::StoreOutcome::Stored { block, index } => (true, block, index),
+    let (stored, block, index) = match bulletin::store_block(&client, &signer, 0x55, &data).await? {
+        bulletin::StoreOutcome::AlreadyPresent { block, index } => (false, block, index),
+        bulletin::StoreOutcome::Stored { block, index } => (true, block, index),
     };
 
     if ui::json() {
@@ -282,102 +276,6 @@ async fn store(
     Ok(())
 }
 
-/// Summary of storing a CAR's blocks on the Bulletin chain.
-pub struct CarStored {
-    pub root: cid::Cid,
-    pub stored: usize,
-    pub skipped: usize,
-}
-
-/// Read a CARv1 file into its root CID + validated, upload-ready blocks. Verifies
-/// each block is sha2-256, hashes to its CID, and fits one ≤2 MiB extrinsic.
-pub async fn read_car_prepared(path: &str) -> Result<(cid::Cid, Vec<chain::PreparedBlock>)> {
-    let file = tokio::fs::File::open(path)
-        .await
-        .with_context(|| format!("opening CAR file {path}"))?;
-    let mut car = iroh_car::CarReader::new(tokio::io::BufReader::new(file))
-        .await
-        .with_context(|| format!("parsing CARv1 header from {path}"))?;
-
-    let root = *car
-        .header()
-        .roots()
-        .first()
-        .context("CAR header has no roots")?;
-
-    let mut prepared = Vec::new();
-    while let Some((cid, data)) = car.next_block().await.context("reading next CAR block")? {
-        let hash = cid.hash();
-        if hash.code() != 0x12 {
-            bail!(
-                "block {cid} uses multihash code 0x{:x}; only sha2-256 (0x12) CARs are supported",
-                hash.code()
-            );
-        }
-        let content_hash = chain::content_hash(&data);
-        if hash.digest() != content_hash {
-            bail!("block {cid}: CAR data does not hash to the CID digest (corrupt CAR?)");
-        }
-        if data.len() > MAX_TRANSACTION_SIZE {
-            bail!(
-                "block {cid} is {} bytes, exceeding the chain's MaxTransactionSize of {MAX_TRANSACTION_SIZE} bytes (2 MiB)",
-                data.len()
-            );
-        }
-        prepared.push(chain::PreparedBlock {
-            codec: cid.codec(),
-            data,
-            content_hash,
-        });
-    }
-    Ok((root, prepared))
-}
-
-/// Store a prepared block set on the Bulletin chain (each block keyed by its own
-/// content hash) so `root`'s DAG resolves on the IPFS gateway. Reuses the single
-/// `client` for the whole upload so metadata is downloaded once.
-pub async fn store_prepared_blocks(
-    env: &Env,
-    client: &OnlineClient<BulletinConfig>,
-    root: cid::Cid,
-    prepared: Vec<chain::PreparedBlock>,
-    signer: &Keypair,
-) -> Result<CarStored> {
-    let total = prepared.len();
-    let (stored, skipped) = chain::store_car_blocks(
-        client,
-        env.bulletin_rpc,
-        signer,
-        &prepared,
-        |done, stored, skipped| {
-            ui::progress(format!(
-                "blocks     {done}/{total} · stored {stored} · skipped {skipped}"
-            ));
-        },
-    )
-    .await?;
-    ui::progress_clear();
-
-    Ok(CarStored {
-        root,
-        stored,
-        skipped,
-    })
-}
-
-/// Store every IPLD block of a CARv1 individually (each keyed by its own content
-/// hash) so the CAR's root DAG resolves on the IPFS gateway. Kubo chunks files
-/// into ≤256 KiB blocks, so every block fits a single ≤2 MiB extrinsic.
-pub async fn store_car_file(
-    env: &Env,
-    client: &OnlineClient<BulletinConfig>,
-    path: &str,
-    signer: &Keypair,
-) -> Result<CarStored> {
-    let (root, prepared) = read_car_prepared(path).await?;
-    store_prepared_blocks(env, client, root, prepared, signer).await
-}
-
 async fn store_car(
     env: &Env,
     path: String,
@@ -385,9 +283,9 @@ async fn store_car(
     derivation_path: Option<String>,
 ) -> Result<()> {
     let signer = resolve_signer(mnemonic, derivation_path)?;
-    let client = chain::bulletin_client(env).await?;
+    let client = bulletin::bulletin_client(env).await?;
     ui::step(format!("upload {path} to Bulletin"));
-    let summary = store_car_file(env, &client, &path, &signer).await?;
+    let summary = bulletin::store_car_file(env, &client, &path, &signer).await?;
 
     let total = summary.stored + summary.skipped;
     let gateway = format!("{}/ipfs/{}/", env.ipfs_gateway, summary.root);

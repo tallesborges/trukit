@@ -1,3 +1,4 @@
+use crate::bulletin;
 use crate::chain;
 use crate::env::Env;
 use crate::ui;
@@ -43,7 +44,7 @@ pub async fn run(
             let signer = chain::build_signer(mnemonic.as_deref(), derivation_path.as_deref())?;
             let account = chain::account_id(&signer);
             let (asset_hub, bulletin) =
-                tokio::try_join!(chain::asset_hub_client(env), chain::bulletin_client(env))?;
+                tokio::try_join!(chain::asset_hub_client(env), bulletin::bulletin_client(env))?;
             let h160 = chain::revive_address(&asset_hub, account).await?;
             let asset_hub_block = asset_hub.at_current_block().await?.block_number();
             let bulletin_block = bulletin.at_current_block().await?.block_number();

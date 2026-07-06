@@ -1,10 +1,10 @@
+mod bulletin;
 mod chain;
 mod commands;
 mod config;
 mod dotns;
 mod env;
 mod merkle;
-mod registrar;
 mod ui;
 
 use clap::{Parser, Subcommand};

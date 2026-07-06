@@ -17,7 +17,7 @@ storage + DotNS naming on Asset Hub (`pallet_revive`). The first-class command i
 
 ## Chain gotchas
 
-- **Pinned metadata.** `chain.rs` static-codegens from `artifacts/paseo_next_v2_{asset_hub,bulletin}.scale`.
+- **Pinned metadata.** `chain/config.rs` static-codegens from `artifacts/paseo_next_v2_{asset_hub,bulletin}.scale`.
   If a call breaks after a runtime upgrade (subxt reports stale metadata), regenerate
   with `just metadata` — don't hand-edit the `.scale` files.
 - **`--env` is a matched set** — it selects the Bulletin RPC **and** the Asset Hub
@@ -25,9 +25,10 @@ storage + DotNS naming on Asset Hub (`pallet_revive`). The first-class command i
   addresses exist only for `paseo-next-v2`; `preview` is content-resolver-only.
 - **DotNS registration rules** — the label digit-suffix rule, the commit/reveal
   `CommitmentTooNew` timing, and the personhood (PoP) tiers — live in the
-  `src/registrar.rs` module docs. Read them before touching the register / deploy flow.
+  `src/dotns/registrar_abi.rs` module docs (the register/deploy flow itself is in
+  `src/dotns/names.rs`). Read them before touching the register / deploy flow.
 - **Surface real reverts.** All `Revive.call` reverts decode returndata via
-  `chain::revert_reason`; show the actual on-chain error, don't hardcode "probably X" hints.
+  `chain::revive::revert_reason`; show the actual on-chain error, don't hardcode "probably X" hints.
 - **`pallet_revive` writes** need an SS58↔H160 mapping and a successful dry-run first;
   derive weight / storage-deposit limits from the dry-run, never magic constants.
 

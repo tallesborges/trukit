@@ -2,7 +2,7 @@
 //! Asset Hub via `pallet_revive`.
 //!
 //! Registration gotchas, all learned by decoding on-chain reverts (surfaced by
-//! `chain::revert_reason`):
+//! [`crate::chain::revive::revert_reason`]):
 //!
 //! - **Label digit rule**: a label must end in *no digits* or *exactly 2 digits*.
 //!   Anything else (e.g. `myapp1` or `myapp1234`) makes `classifyName` revert with
@@ -11,7 +11,7 @@
 //! - **Commit/reveal timing**: `register` reverts with `CommitmentTooNew`
 //!   (`0x74480cc9`) until the commitment matures. The dry-run evaluates against the
 //!   lagging *finalized* block, so a fixed wall-clock sleep races the chain clock —
-//!   poll the dry-run until it clears instead (see `chain::await_commitment_mature`).
+//!   poll the dry-run until it clears instead (see [`super::names::await_commitment_mature`]).
 //! - **Tier vs. availability**: `classifyName` returns `(tier, status)` where
 //!   `status` is a human string like "Available to all"; tier `0` is open, higher
 //!   tiers are PoP-gated (see the `dotns` skill / substrate-chain-toolkit for PoP).
@@ -85,8 +85,7 @@ pub fn encode_classify_name(label: &str) -> Vec<u8> {
 
 /// Decode `classifyName` -> the numeric PoP status (0 == open/NoStatus).
 pub fn decode_classify_status(data: &[u8]) -> Result<u8> {
-    let ret = classifyNameCall::abi_decode_returns(data).context("decoding classifyName return")?;
-    Ok(ret._0)
+    Ok(decode_classify(data)?.0)
 }
 
 /// Decode `classifyName` -> `(tier, status)` where `status` is the human-readable
@@ -215,21 +214,25 @@ pub fn decode_personhood_status(data: &[u8]) -> Result<u8> {
     Ok(ret.status)
 }
 
+/// Wei per native planck: 18-decimal EVM wei scaled to the 10-decimal native
+/// token is a ratio of 1e8. Shared by every wei→native conversion below.
+const WEI_PER_NATIVE_PLANCK: u64 = 100_000_000;
+
 /// Convert an 18-decimal EVM wei price into the native `Revive.call` value.
 /// Applies the +10% margin the contract charges, ceiling the wei division,
 /// then scales from 18-decimal wei to the 10-decimal native token (ratio 1e8).
 pub fn register_value_native(price_wei: U256) -> Result<u128> {
     let scaled = price_wei * U256::from(11u64);
     let with_margin = (scaled + U256::from(9u64)) / U256::from(10u64);
-    let native = with_margin / U256::from(100_000_000u64);
+    let native = with_margin / U256::from(WEI_PER_NATIVE_PLANCK);
     u128::try_from(native).context("register value overflows u128")
 }
 
 /// Convert an 18-decimal EVM wei fee (e.g. `quoteTransferFee`) into native
-/// plancks, ceiling the 1e8 wei→native division so we never underpay and trip
+/// plancks, ceiling the wei→native division so we never underpay and trip
 /// `TransferFeeRequired`. No margin — the quote is already the exact fee.
 pub fn fee_value_native(fee_wei: U256) -> Result<u128> {
-    let ratio = U256::from(100_000_000u64);
+    let ratio = U256::from(WEI_PER_NATIVE_PLANCK);
     let native = (fee_wei + ratio - U256::from(1u64)) / ratio;
     u128::try_from(native).context("transfer fee overflows u128")
 }
@@ -238,7 +241,7 @@ pub fn fee_value_native(fee_wei: U256) -> Result<u128> {
 /// the base "list price" shown by `name lookup`, distinct from the payable
 /// [`register_value_native`] which adds the contract's +10% registration margin.
 pub fn base_price_native(price_wei: U256) -> Result<u128> {
-    let native = price_wei / U256::from(100_000_000u64);
+    let native = price_wei / U256::from(WEI_PER_NATIVE_PLANCK);
     u128::try_from(native).context("price overflows u128")
 }
 

@@ -1,5 +1,5 @@
+use crate::bulletin;
 use crate::chain;
-use crate::commands::bulletin;
 use crate::config::DeployConfig;
 use crate::dotns;
 use crate::env::Env;
@@ -41,7 +41,7 @@ pub async fn run(
 
     let owner = chain::build_signer(mnemonic.as_deref(), derivation_path.as_deref())?;
     let asset_hub = chain::asset_hub_client(env).await?;
-    chain::ensure_domain(&asset_hub, env, &owner, &domain, args.register).await?;
+    dotns::ensure_domain(&asset_hub, env, &owner, &domain, args.register).await?;
 
     let (content_cid, prepared) = match &args.input_car {
         Some(car) => {
@@ -64,11 +64,11 @@ pub async fn run(
     };
     ui::kv("content", content_cid);
 
-    let pool = bulletin::pool_signer()?;
+    let pool = chain::pool_signer()?;
     ui::step("upload to Bulletin");
-    let bulletin = chain::bulletin_client(env).await?;
+    let client = bulletin::bulletin_client(env).await?;
     let stored =
-        bulletin::store_prepared_blocks(env, &bulletin, content_cid, prepared, &pool).await?;
+        bulletin::store_prepared_blocks(env, &client, content_cid, prepared, &pool).await?;
     ui::kv(
         "blocks",
         format!(
@@ -87,8 +87,8 @@ pub async fn run(
         "bind {domain} → {}",
         ui::ellipsize(&content_cid.to_string())
     ));
-    let expected = chain::set_contenthash(&asset_hub, env, &owner, &domain, &content_cid).await?;
-    let onchain = chain::resolve_contenthash(&asset_hub, env, &domain).await?;
+    let expected = dotns::set_contenthash(&asset_hub, env, &owner, &domain, &content_cid).await?;
+    let onchain = dotns::resolve_contenthash(&asset_hub, env, &domain).await?;
     if onchain != expected {
         bail!(
             "read-back mismatch: set 0x{} but chain has 0x{}",
@@ -99,7 +99,7 @@ pub async fn run(
 
     for (key, value) in &config.text {
         ui::step(format!("set '{key}' on {domain}"));
-        chain::set_text(&asset_hub, env, &owner, &domain, key, value).await?;
+        dotns::set_text(&asset_hub, env, &owner, &domain, key, value).await?;
         ui::kv(key, ui::ellipsize(value));
     }
 
