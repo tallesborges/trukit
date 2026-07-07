@@ -35,6 +35,7 @@ pub async fn run(
     args: Args,
     mnemonic: Option<String>,
     derivation_path: Option<String>,
+    pool_source: crate::pool::PoolSource,
 ) -> Result<()> {
     let domain = dotns::normalize_name(&args.domain);
     let config = DeployConfig::load(args.config.as_deref())?;
@@ -64,7 +65,7 @@ pub async fn run(
     };
     ui::kv("content", content_cid);
 
-    let pool = chain::pool_signer()?;
+    let pool = crate::pool::pool_signer(pool_source)?;
     ui::step("upload to Bulletin");
     let client = bulletin::bulletin_client(env).await?;
     let stored =

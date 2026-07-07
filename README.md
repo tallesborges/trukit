@@ -61,8 +61,9 @@ dotkit asset-hub name register myapp.dot
 | `account env` | Print the resolved environment config. |
 | `account whoami` | Derive the signer and prove Asset Hub + Bulletin connectivity. |
 | `account info` | Show the signer's Asset Hub native (PAS) balance. |
-
-### `deploy` flags
+| `bulletin pool init [--accounts N] [--force]` | Generate a private per-machine Bulletin upload pool (`~/.dotkit/pool.toml`, `0600`) and print its `//deploy/N` accounts. Testnet-only. |
+| `bulletin pool status` | Show each pool account's on-chain authorization + quota (txs/bytes used vs allowance) with an `N/M authorized` rollup. `--pool shared` inspects the shared pool instead. |
+| `bulletin pool authorize [--transactions N] [--bytes N]` | Authorize all pool accounts for Bulletin storage in one `utility.batch_all` (signer defaults to `//Alice`). Idempotent — skips already-authorized. |
 
 - `--register` — register the domain first (open, or Lite/Full if the signer is verified) when it isn't already owned.
 - `--config <deploy.toml>` — write text records from a config after the bind (auto-detected as `./deploy.toml`).
@@ -74,6 +75,7 @@ dotkit asset-hub name register myapp.dot
 - `--env <id>` — target environment (default `paseo-next-v2`).
 - `--mnemonic <phrase>` — signer mnemonic. Falls back to `$MNEMONIC`, then `$DOTNS_MNEMONIC`; defaults to a shared dev account on testnets.
 - `--derivation-path <path>` — Substrate derivation path (e.g. `//Alice`).
+- `--pool <local|shared>` — which Bulletin upload pool to sign with. Default: the private `~/.dotkit` pool if a keystore exists (see `bulletin pool init`), else the shared dev pool.
 - `-q`, `--quiet` — suppress step/detail output; only errors are printed (useful in CI/scripts).
 - `--json` — emit one machine-readable JSON object per command instead of human output; on failure prints `{"error": …}` to stderr.
 

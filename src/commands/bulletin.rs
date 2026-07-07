@@ -2,10 +2,12 @@ use crate::bulletin;
 use crate::chain;
 use crate::chain::config::bulletin as bulletin_rt;
 use crate::env::Env;
+use crate::pool;
 use crate::ui;
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use serde_json::json;
+use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 use subxt::utils::AccountId32;
@@ -49,6 +51,35 @@ pub enum Cmd {
         #[arg(long, default_value_t = 1_073_741_824)]
         bytes: u64,
     },
+    /// Manage the private per-machine upload pool (`~/.dotkit/pool.toml`). Testnet-only.
+    #[command(subcommand)]
+    Pool(PoolCmd),
+}
+
+#[derive(Subcommand)]
+pub enum PoolCmd {
+    /// Generate + persist a private pool keystore and print its `//deploy/N` accounts.
+    Init {
+        /// Number of //deploy/N accounts to derive.
+        #[arg(long, default_value_t = pool::DEFAULT_ACCOUNTS)]
+        accounts: u32,
+        /// Overwrite an existing keystore (generates a NEW mnemonic).
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show the private pool accounts (offline; no chain access).
+    Status,
+    /// Authorize every pool account for Bulletin storage in one `utility.batch_all`.
+    /// Signer defaults to `//Alice` (the testnet Authorizer); override with global
+    /// `--mnemonic`/`--derivation-path`. Idempotent: already-authorized accounts are skipped.
+    Authorize {
+        /// Transaction count to authorize per account.
+        #[arg(long, default_value_t = 1_000_000)]
+        transactions: u32,
+        /// Byte allowance per account (default: 100 MiB).
+        #[arg(long, default_value_t = 104_857_600)]
+        bytes: u64,
+    },
 }
 
 pub async fn run(
@@ -56,27 +87,42 @@ pub async fn run(
     cmd: Cmd,
     mnemonic: Option<String>,
     derivation_path: Option<String>,
+    pool_source: pool::PoolSource,
 ) -> Result<()> {
     match cmd {
-        Cmd::Status { address } => status(env, address, mnemonic, derivation_path).await,
-        Cmd::Store { path } => store(env, path, mnemonic, derivation_path).await,
-        Cmd::StoreCar { path } => store_car(env, path, mnemonic, derivation_path).await,
+        Cmd::Status { address } => {
+            status(env, address, mnemonic, derivation_path, pool_source).await
+        }
+        Cmd::Store { path } => store(env, path, mnemonic, derivation_path, pool_source).await,
+        Cmd::StoreCar { path } => {
+            store_car(env, path, mnemonic, derivation_path, pool_source).await
+        }
         Cmd::Verify { cid } => verify(env, cid).await,
         Cmd::Authorize {
             address,
             transactions,
             bytes,
         } => authorize(env, address, transactions, bytes, mnemonic, derivation_path).await,
+        Cmd::Pool(PoolCmd::Init { accounts, force }) => pool_init(accounts, force),
+        Cmd::Pool(PoolCmd::Status) => pool_status(env, pool_source).await,
+        Cmd::Pool(PoolCmd::Authorize {
+            transactions,
+            bytes,
+        }) => pool_authorize(env, mnemonic, derivation_path, transactions, bytes).await,
     }
 }
 
 /// Resolve the write signer: the caller's mnemonic when supplied, otherwise a
-/// random authorized account from the shared Bulletin storage pool (the default
-/// owner signer has no Bulletin quota — only the pool accounts do).
-fn resolve_signer(mnemonic: Option<String>, derivation_path: Option<String>) -> Result<Keypair> {
+/// random authorized account from the selected Bulletin pool (the default owner
+/// signer has no Bulletin quota — only pool accounts do).
+fn resolve_signer(
+    mnemonic: Option<String>,
+    derivation_path: Option<String>,
+    pool_source: pool::PoolSource,
+) -> Result<Keypair> {
     match mnemonic {
         Some(phrase) => chain::build_signer(Some(&phrase), derivation_path.as_deref()),
-        None => chain::pool_signer(),
+        None => pool::pool_signer(pool_source),
     }
 }
 
@@ -85,11 +131,12 @@ async fn status(
     address: Option<String>,
     mnemonic: Option<String>,
     derivation_path: Option<String>,
+    pool_source: pool::PoolSource,
 ) -> Result<()> {
     let account = match address {
         Some(addr) => AccountId32::from_str(&addr)
             .map_err(|e| anyhow::anyhow!("invalid SS58 address: {e}"))?,
-        None => chain::account_id(&resolve_signer(mnemonic, derivation_path)?),
+        None => chain::account_id(&resolve_signer(mnemonic, derivation_path, pool_source)?),
     };
 
     let client = bulletin::bulletin_client(env).await?;
@@ -235,6 +282,7 @@ async fn store(
     path: String,
     mnemonic: Option<String>,
     derivation_path: Option<String>,
+    pool_source: pool::PoolSource,
 ) -> Result<()> {
     let data = std::fs::read(&path).with_context(|| format!("reading file {path}"))?;
     if data.len() > bulletin::MAX_TRANSACTION_SIZE {
@@ -249,7 +297,7 @@ async fn store(
     let gateway_url = format!("{}/ipfs/{cid}", env.ipfs_gateway);
 
     let client = bulletin::bulletin_client(env).await?;
-    let signer = resolve_signer(mnemonic, derivation_path)?;
+    let signer = resolve_signer(mnemonic, derivation_path, pool_source)?;
 
     let (stored, block, index) = match bulletin::store_block(&client, &signer, 0x55, &data).await? {
         bulletin::StoreOutcome::AlreadyPresent { block, index } => (false, block, index),
@@ -281,8 +329,9 @@ async fn store_car(
     path: String,
     mnemonic: Option<String>,
     derivation_path: Option<String>,
+    pool_source: pool::PoolSource,
 ) -> Result<()> {
-    let signer = resolve_signer(mnemonic, derivation_path)?;
+    let signer = resolve_signer(mnemonic, derivation_path, pool_source)?;
     let client = bulletin::bulletin_client(env).await?;
     ui::step(format!("upload {path} to Bulletin"));
     let summary = bulletin::store_car_file(env, &client, &path, &signer).await?;
@@ -307,6 +356,186 @@ async fn store_car(
             ),
         );
         ui::kv("gateway", gateway);
+    }
+    Ok(())
+}
+
+// ---- private upload pool (`bulletin pool …`) ----
+
+fn pool_init(accounts: u32, force: bool) -> Result<()> {
+    if accounts == 0 {
+        bail!("--accounts must be >= 1");
+    }
+    let path = pool::keystore_path()?;
+    if let Some(existing) = pool::load()? {
+        if !force {
+            bail!(
+                "pool keystore already exists at {} ({} accounts); \
+                 run `dotkit bulletin pool status` to view, or pass --force to regenerate",
+                path.display(),
+                existing.accounts
+            );
+        }
+    }
+    let p = pool::generate(accounts)?;
+    let path = pool::save(&p)?;
+    print_pool(&p, &path, true)
+}
+
+async fn pool_status(env: &Env, pool_source: pool::PoolSource) -> Result<()> {
+    let (label, accts) = pool::accounts_for(pool_source)?;
+    let client = bulletin::bulletin_client(env).await?;
+
+    ui::step(format!("pool status ({label} · {} accounts)", accts.len()));
+    let mut authorized = 0usize;
+    let mut rows = Vec::new();
+    for (i, a) in &accts {
+        let info = bulletin::authorization(&client, a).await?;
+        if info.is_some() {
+            authorized += 1;
+        }
+        rows.push((*i, a.clone(), info));
+    }
+
+    if ui::json() {
+        let accounts: Vec<_> = rows
+            .iter()
+            .map(|(i, a, info)| match info {
+                Some(e) => json!({
+                    "index": i,
+                    "ss58": a.to_string(),
+                    "authorized": true,
+                    "transactions": e.transactions,
+                    "transactions_allowance": e.transactions_allowance,
+                    "bytes": e.bytes,
+                    "bytes_allowance": e.bytes_allowance,
+                    "expires_block": e.expiration,
+                }),
+                None => json!({ "index": i, "ss58": a.to_string(), "authorized": false }),
+            })
+            .collect();
+        ui::emit(&json!({
+            "pool": label,
+            "count": accts.len(),
+            "authorized": authorized,
+            "accounts": accounts,
+        }));
+    } else {
+        for (i, a, info) in &rows {
+            let addr = ui::ellipsize(&a.to_string());
+            match info {
+                Some(e) => ui::kv(
+                    &format!("//deploy/{i}"),
+                    format!(
+                        "{addr}  txs {}/{} · bytes {}/{} · exp #{}",
+                        e.transactions, e.transactions_allowance, e.bytes, e.bytes_allowance,
+                        e.expiration
+                    ),
+                ),
+                None => ui::kv(&format!("//deploy/{i}"), format!("{addr}  ✗ not authorized")),
+            }
+        }
+        ui::success(format!("{authorized}/{} authorized ({label} pool)", accts.len()));
+    }
+    Ok(())
+}
+
+async fn pool_authorize(
+    env: &Env,
+    mnemonic: Option<String>,
+    derivation_path: Option<String>,
+    transactions: u32,
+    bytes: u64,
+) -> Result<()> {
+    let path = pool::keystore_path()?;
+    let Some(p) = pool::load()? else {
+        bail!(
+            "no pool keystore at {} — run `dotkit bulletin pool init` first",
+            path.display()
+        );
+    };
+    let accts = pool::accounts(&p)?;
+
+    // Authorizer signer: default to the testnet Authorizer `//Alice`; otherwise
+    // honour an explicit --mnemonic/--derivation-path.
+    let signer = match (mnemonic.as_deref(), derivation_path.as_deref()) {
+        (None, None) => chain::build_signer(None, Some("//Alice"))?,
+        (m, d) => chain::build_signer(m, d)?,
+    };
+
+    let client = bulletin::bulletin_client(env).await?;
+
+    ui::step("check existing authorizations");
+    let mut pending = Vec::new();
+    for (i, a) in &accts {
+        if bulletin::is_authorized(&client, a).await? {
+            ui::kv(&format!("//deploy/{i}"), "already authorized");
+        } else {
+            pending.push(a.clone());
+        }
+    }
+
+    if pending.is_empty() {
+        if ui::json() {
+            ui::emit(&json!({
+                "authorized": 0,
+                "skipped": accts.len(),
+                "status": "all-authorized",
+            }));
+        } else {
+            ui::success(format!(
+                "all {} pool accounts already authorized",
+                accts.len()
+            ));
+        }
+        return Ok(());
+    }
+
+    ui::step(format!(
+        "authorize {} account(s) via utility.batch_all",
+        pending.len()
+    ));
+    let tx =
+        bulletin::batch_authorize_accounts(&client, &signer, &pending, transactions, bytes).await?;
+
+    if ui::json() {
+        ui::emit(&json!({
+            "authorized": pending.len(),
+            "skipped": accts.len() - pending.len(),
+            "transactions": transactions,
+            "bytes": bytes,
+            "tx": format!("0x{}", hex::encode(tx)),
+        }));
+    } else {
+        ui::success(format!("authorized {} account(s)", pending.len()));
+        ui::kv("txs", transactions);
+        ui::kv("bytes", bytes);
+        ui::kv("tx", format!("0x{}", hex::encode(tx)));
+    }
+    Ok(())
+}
+
+fn print_pool(p: &pool::Pool, path: &Path, created: bool) -> Result<()> {
+    let accts = pool::accounts(p)?;
+    if ui::json() {
+        ui::emit(&json!({
+            "keystore": path.display().to_string(),
+            "count": p.accounts,
+            "accounts": accts
+                .iter()
+                .map(|(i, a)| json!({ "index": i, "ss58": a.to_string() }))
+                .collect::<Vec<_>>(),
+        }));
+    } else {
+        if created {
+            ui::success("created private upload pool");
+        }
+        ui::kv("keystore", path.display());
+        ui::kv("accounts", p.accounts);
+        ui::note("testnet-only · plaintext mnemonic · no mainnet value");
+        for (i, a) in &accts {
+            ui::kv(&format!("//deploy/{i}"), a);
+        }
     }
     Ok(())
 }

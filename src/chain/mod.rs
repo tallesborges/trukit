@@ -11,4 +11,4 @@ pub mod signer;
 
 pub use asset_hub::{account_balance, asset_hub_client, transfer_keep_alive};
 pub use revive::{ensure_mapped, revive_address};
-pub use signer::{account_id, build_signer, pool_signer};
+pub use signer::{account_id, build_signer, shared_pool_signer};

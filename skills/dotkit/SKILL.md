@@ -33,8 +33,9 @@ Fast single-binary Rust CLI for the Polkadot Triangle/Trinity stack: **Bulletin*
 | `asset-hub name text get <name.dot> <key>` | Read a text record. |
 | `account env` / `account whoami` | Print resolved env / prove signer + chain connectivity (shows SS58 + H160). |
 | `account info` | Show the signer's Asset Hub native (PAS) balance. |
+| `bulletin pool init [--accounts N] [--force]` / `status` / `authorize [--transactions N] [--bytes N]` | Manage a **private per-machine** Bulletin upload pool (`~/.dotkit/pool.toml`, `0600`; derived `//deploy/N`). `status` shows each account's **on-chain** auth + quota with an `N/M authorized` rollup (honors `--pool`, so `--pool shared` inspects the shared pool). `authorize` batch-authorizes all accounts via `//Alice` (`utility.batch_all`, idempotent). `deploy`/`store` use the pool by default (override with `--pool local\|shared`). Testnet-only. |
 
-**Global flags:** `--env <id>` (default `paseo-next-v2`), `--mnemonic`, `--derivation-path //x`, `-q/--quiet`, `--json` (one machine-readable JSON object per command; errors become `{"error": …}` on stderr).
+**Global flags:** `--env <id>` (default `paseo-next-v2`), `--mnemonic`, `--derivation-path //x`, `--pool <local|shared>` (Bulletin upload pool; default: private `~/.dotkit` pool if a keystore exists, else shared), `-q/--quiet`, `--json` (one machine-readable JSON object per command; errors become `{"error": …}` on stderr).
 **`deploy` flags:** `--register`, `--config <deploy.toml>`, `--input-car <file>`, `--kubo`.
 
 ## Signer & account model

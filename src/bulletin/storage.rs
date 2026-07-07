@@ -420,3 +420,85 @@ pub async fn authorize_bulletin_account(
         )?;
     Ok(events.extrinsic_hash().0)
 }
+
+/// Decoded Bulletin `TransactionStorage` authorization extent for an account.
+pub struct AuthInfo {
+    pub transactions: u32,
+    pub transactions_allowance: u32,
+    pub bytes: u64,
+    pub bytes_allowance: u64,
+    pub expiration: u32,
+}
+
+/// Read an account's Bulletin authorization + quota, or `None` if unauthorized.
+pub async fn authorization(
+    client: &OnlineClient<BulletinConfig>,
+    who: &AccountId32,
+) -> Result<Option<AuthInfo>> {
+    let scope = bulletin::runtime_types::pallet_bulletin_transaction_storage::types::AuthorizationScope::Account(who.clone());
+    let address = bulletin::storage().transaction_storage().authorizations();
+    let at = client.at_current_block().await?;
+    let got = at
+        .storage()
+        .try_fetch(address, (scope,))
+        .await
+        .context("reading TransactionStorage.Authorizations")?;
+    match got {
+        Some(v) => {
+            let a = v.decode().context("decoding Authorization")?;
+            let e = a.extent;
+            Ok(Some(AuthInfo {
+                transactions: e.transactions,
+                transactions_allowance: e.transactions_allowance,
+                bytes: e.bytes,
+                bytes_allowance: e.bytes_allowance,
+                expiration: a.expiration,
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Whether `who` currently holds a Bulletin `TransactionStorage` authorization.
+pub async fn is_authorized(client: &OnlineClient<BulletinConfig>, who: &AccountId32) -> Result<bool> {
+    Ok(authorization(client, who).await?.is_some())
+}
+
+/// Authorize many accounts in a single `utility.batch_all`, signed by an
+/// Authorizer. Atomic: if any inner `authorize_account` fails the whole batch
+/// rolls back. The signer must hold Bulletin Authorizer privileges (else
+/// `BadOrigin`). Returns the finalized extrinsic hash.
+pub async fn batch_authorize_accounts(
+    client: &OnlineClient<BulletinConfig>,
+    signer: &Keypair,
+    accounts: &[AccountId32],
+    transactions: u32,
+    bytes: u64,
+) -> Result<[u8; 32]> {
+    let calls: Vec<bulletin::runtime_types::bulletin_paseo_runtime::RuntimeCall> = accounts
+        .iter()
+        .map(|who| {
+            bulletin::runtime_types::bulletin_paseo_runtime::RuntimeCall::TransactionStorage(
+                bulletin::runtime_types::pallet_bulletin_transaction_storage::pallet::Call::authorize_account {
+                    who: who.clone(),
+                    transactions,
+                    bytes,
+                },
+            )
+        })
+        .collect();
+    let call = bulletin::tx().utility().batch_all(calls);
+    let events = client
+        .tx()
+        .await?
+        .sign_and_submit_then_watch_default(&call, signer)
+        .await
+        .context("submitting utility.batch_all(authorize_account)")?
+        .wait_for_finalized_success()
+        .await
+        .context(
+            "batch_all authorize did not finalize successfully \
+             (the signer must hold Bulletin Authorizer privileges)",
+        )?;
+    Ok(events.extrinsic_hash().0)
+}
