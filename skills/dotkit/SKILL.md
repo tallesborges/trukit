@@ -41,7 +41,7 @@ Fast single-binary Rust CLI for the Polkadot Triangle/Trinity stack: **Bulletin*
 ## Signer & account model
 
 - Default signer = a shared **dev account** (base of the standard dev phrase); its base derivation is the dev-mode DotNS owner on testnets. Override with `--mnemonic` (or `$MNEMONIC`, then `$DOTNS_MNEMONIC`) + `--derivation-path`.
-- **Bulletin writes** use a random authorized **pool account** `//deploy/{0..9}` (derived from the dev phrase). These are Bulletin-authorized but **not funded on Asset Hub** — never use one as the DotNS owner signer (its `map_account`/bind will fail "balance too low").
+- **Bulletin writes** use a random authorized **pool account** `//deploy/{0..N}`. By default this is the **private per-machine pool** (`~/.dotkit/pool.toml`) when a keystore exists (`bulletin pool init` + `bulletin pool authorize`), else the **shared** `DEV_PHRASE//deploy/{0..9}` pool; force either with `--pool local|shared`. Pool accounts are Bulletin-authorized but **not funded on Asset Hub** — never use one as the DotNS owner signer (its `map_account`/bind will fail "balance too low").
 - Every Revive write auto-runs `Revive.map_account` if the signer isn't mapped.
 
 ## DotNS naming rules & PoP tiers (verified on-chain)
