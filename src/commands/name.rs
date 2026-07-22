@@ -38,6 +38,16 @@ pub enum Cmd {
         /// Recipient address: a 0x-prefixed H160 or an SS58 address.
         to: String,
     },
+    /// List a .dot name in Browse via the Publisher registry (paseo-next-v2).
+    Publish {
+        /// The .dot name to publish (must be owned by the signer).
+        name: String,
+    },
+    /// Remove a .dot name from Browse via the Publisher registry (paseo-next-v2).
+    Unpublish {
+        /// The .dot name to unpublish (must be owned by the signer).
+        name: String,
+    },
     /// Read or set a .dot name's raw contenthash record.
     #[command(subcommand)]
     Content(ContentCmd),
@@ -116,6 +126,12 @@ pub async fn run(
         }
         Cmd::Transfer { name, to } => {
             transfer(env, &name, &to, mnemonic, derivation_path).await?;
+        }
+        Cmd::Publish { name } => {
+            publish(env, &name, true, mnemonic, derivation_path).await?;
+        }
+        Cmd::Unpublish { name } => {
+            publish(env, &name, false, mnemonic, derivation_path).await?;
         }
         Cmd::Content(ContentCmd::Read(args)) => {
             let raw = args.first().context("usage: name content <name>")?;
@@ -291,6 +307,35 @@ async fn transfer(
         ui::kv("from", format!("0x{}", hex::encode(outcome.from.0)));
         ui::kv("to", format!("0x{}", hex::encode(outcome.to.0)));
         ui::kv("fee", format!("~{fee_pas} PAS"));
+    }
+    Ok(())
+}
+
+async fn publish(
+    env: &Env,
+    name: &str,
+    publish: bool,
+    mnemonic: Option<String>,
+    derivation_path: Option<String>,
+) -> Result<()> {
+    let signer = chain::build_signer(mnemonic.as_deref(), derivation_path.as_deref())?;
+    let outcome = if publish {
+        crate::publisher::publish(env, &signer, name).await?
+    } else {
+        crate::publisher::unpublish(env, &signer, name).await?
+    };
+    let verb = if publish { "published" } else { "unpublished" };
+    if ui::json() {
+        ui::emit(&json!({
+            "name": dotns::normalize_name(name),
+            "label": outcome.label,
+            "published": publish,
+            "publisher": format!("0x{}", hex::encode(outcome.publisher.0)),
+            "tx": format!("0x{}", hex::encode(outcome.tx)),
+        }));
+    } else {
+        ui::success(format!("{verb} {}.dot", outcome.label));
+        ui::kv("tx", format!("0x{}", hex::encode(outcome.tx)));
     }
     Ok(())
 }

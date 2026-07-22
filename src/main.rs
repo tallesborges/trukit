@@ -6,6 +6,7 @@ mod dotns;
 mod env;
 mod merkle;
 mod pool;
+mod publisher;
 mod ui;
 
 use clap::{Parser, Subcommand};

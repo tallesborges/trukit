@@ -28,6 +28,13 @@ pub struct Args {
     /// Register the domain (open-tier) if it isn't already owned by the signer.
     #[arg(long)]
     pub register: bool,
+    /// After deploy, list the domain in Browse via the Publisher registry
+    /// (paseo-next-v2 only; signer must own the label).
+    #[arg(long)]
+    pub publish: bool,
+    /// Make a `--publish` failure hard-fail the command (default: warn, exit 0).
+    #[arg(long)]
+    pub fail_on_publish_error: bool,
 }
 
 pub async fn run(
@@ -104,6 +111,21 @@ pub async fn run(
         ui::kv(key, ui::ellipsize(value));
     }
 
+    let mut published = false;
+    if args.publish {
+        ui::step(format!("publish {domain} to Browse"));
+        match crate::publisher::publish(env, &owner, &domain).await {
+            Ok(outcome) => {
+                ui::kv("tx", format!("0x{}", hex::encode(outcome.tx)));
+                published = true;
+            }
+            Err(err) if args.fail_on_publish_error => {
+                return Err(err.context("publish failed"));
+            }
+            Err(err) => ui::note(format!("publish failed (non-fatal): {err}")),
+        }
+    }
+
     let label = domain.strip_suffix(".dot").unwrap_or(&domain);
     let url = (!env.web_gateway.is_empty()).then(|| format!("https://{label}.{}", env.web_gateway));
     if ui::json() {
@@ -111,6 +133,7 @@ pub async fn run(
             "domain": domain,
             "content": content_cid.to_string(),
             "url": url,
+            "published": published,
             "blocks": { "stored": stored.stored, "skipped": stored.skipped },
         }));
     } else {
@@ -119,6 +142,9 @@ pub async fn run(
         ui::kv("content", content_cid);
         if let Some(url) = url {
             ui::kv("url", url);
+        }
+        if published {
+            ui::kv("browse", "published");
         }
     }
     Ok(())

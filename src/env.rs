@@ -24,6 +24,10 @@ pub struct Env {
     /// v2 this is `paseo.li` (the old `dot.li` gateway pointed at the now-dead
     /// Summit chain). Empty when unknown.
     pub web_gateway: &'static str,
+    /// Browse Publisher registry (`publish`/`unpublish` a `.dot` label so it
+    /// shows up in Browse). Only deployed on paseo-next-v2 so far; empty
+    /// elsewhere (dotkit refuses `--publish` when unset).
+    pub publisher: &'static str,
 }
 
 impl Env {
@@ -40,6 +44,7 @@ impl Env {
                 registry: "0xa1b2b939E82b2ecE55Bd8a0E283818BfC1CA6CDc",
                 registrar: "0xf7Ad3F44F316C73E4a2b46b1ed48d376bCc9E639",
                 web_gateway: "paseo.li",
+                publisher: "0x0d30645f1d2c7dfa11926190e456a45db440581f",
             },
             "preview" => Env {
                 id: "preview",
@@ -52,6 +57,7 @@ impl Env {
                 registry: "",
                 registrar: "",
                 web_gateway: "",
+                publisher: "",
             },
             other => bail!("unknown --env '{other}' (known: paseo-next-v2, preview)"),
         })

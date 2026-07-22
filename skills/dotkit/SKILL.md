@@ -1,6 +1,6 @@
 ---
 name: dotkit
-description: "Use when working with the dotkit CLI (a fast single-binary Rust tool for Bulletin storage + DotNS naming on Paseo Asset Hub / pallet_revive) — deploying a static build dir to a .dot domain (merkleize, Bulletin upload, bind contenthash), registering an open-tier .dot name, looking up who owns a name or whether it's available, transferring a name you own, resolving or setting a name's contenthash/text records, verifying a CID resolves on the gateway, checking or granting Bulletin quota, checking a PAS balance, mapping SS58 to H160, emitting machine-readable --json, or diagnosing a register/bind revert. Trigger phrases: deploy my app to a .dot with dotkit, dotkit deploy ./dist myapp.dot, register a .dot name, who owns this .dot, transfer a .dot to someone, bind a CID to a .dot, verify a CID resolves, authorize an account for Bulletin, why did dotkit register revert, set a manifest text record, dotkit deploy --register, what PoP tier does this name need."
+description: "Use when working with the dotkit CLI (a fast single-binary Rust tool for Bulletin storage + DotNS naming on Paseo Asset Hub / pallet_revive) — deploying a static build dir to a .dot domain (merkleize, Bulletin upload, bind contenthash), registering an open-tier .dot name, looking up who owns a name or whether it's available, transferring a name you own, resolving or setting a name's contenthash/text records, publishing a deployed name to Browse via the Publisher registry, verifying a CID resolves on the gateway, checking or granting Bulletin quota, checking a PAS balance, mapping SS58 to H160, emitting machine-readable --json, or diagnosing a register/bind revert. Trigger phrases: deploy my app to a .dot with dotkit, dotkit deploy ./dist myapp.dot, register a .dot name, who owns this .dot, transfer a .dot to someone, bind a CID to a .dot, publish my app to Browse, dotkit deploy --publish, unpublish a .dot from Browse, verify a CID resolves, authorize an account for Bulletin, why did dotkit register revert, set a manifest text record, dotkit deploy --register, what PoP tier does this name need."
 ---
 
 # dotkit
@@ -14,7 +14,7 @@ Fast single-binary Rust CLI for the Polkadot Triangle/Trinity stack: **Bulletin*
 
 | Command | What it does |
 |---|---|
-| `deploy <dir> <domain.dot>` | Merkleize → Bulletin upload → bind `.dot` contenthash. Add `--register` to auto-register an open-tier name. |
+| `deploy <dir> <domain.dot>` | Merkleize → Bulletin upload → bind `.dot` contenthash. Add `--register` to auto-register an open-tier name; `--publish` to also list it in Browse. |
 | `bulletin store <file>` | Store one blob (≤2 MiB) on Bulletin. |
 | `bulletin store-car <file.car>` | Store every block of a CARv1 so its root resolves. |
 | `bulletin status [--address <ss58>]` | Bulletin authorization / quota for an account. |
@@ -27,6 +27,8 @@ Fast single-binary Rust CLI for the Polkadot Triangle/Trinity stack: **Bulletin*
 | `asset-hub name lookup <name.dot>` | Read-only overview: owner, required tier + status, base price, contenthash. |
 | `asset-hub name register <name.dot>` | Register a name (commit/reveal) to the signer — open, or Lite/Full with a personhood-verified signer. |
 | `asset-hub name transfer <name.dot> <to>` | Transfer a name you own to `<to>` (0x H160 or SS58); pays the quoted friction fee. |
+| `asset-hub name publish <name.dot>` | List a name you own in Browse via the Publisher registry (paseo-next-v2). |
+| `asset-hub name unpublish <name.dot>` | Remove a name you own from Browse (no rebuild needed). |
 | `asset-hub name content set <name.dot> <cid>` | Bind a CID to a name's contenthash. |
 | `asset-hub name content <name.dot>` | Read the raw contenthash record. |
 | `asset-hub name text set <name.dot> <key> <value>` | Set a text record (e.g. `manifest`, `executable`). |
@@ -36,7 +38,7 @@ Fast single-binary Rust CLI for the Polkadot Triangle/Trinity stack: **Bulletin*
 | `bulletin pool init [--accounts N] [--force] [--skip-authorize]` / `status` / `authorize [--transactions N] [--bytes N]` | Manage a **private per-machine** Bulletin upload pool (`~/.dotkit/pool.toml`, `0600`; derived `//deploy/N`). `init` generates the keystore **and authorizes** its accounts on-chain via `//Alice` (`utility.batch_all`) in one step — pass `--skip-authorize` for offline-only generation. `status` shows each account's **on-chain** auth + quota with an `N/M authorized` rollup (honors `--pool`, so `--pool shared` inspects the shared pool). `authorize` (re)batch-authorizes all accounts via `//Alice` (idempotent). `deploy`/`store` use the pool by default (override with `--pool local\|shared`). Testnet-only. |
 
 **Global flags:** `--env <id>` (default `paseo-next-v2`), `--mnemonic`, `--derivation-path //x`, `--pool <local|shared>` (Bulletin upload pool; default: private `~/.dotkit` pool if a keystore exists, else shared), `-q/--quiet`, `--json` (one machine-readable JSON object per command; errors become `{"error": …}` on stderr).
-**`deploy` flags:** `--register`, `--config <deploy.toml>`, `--input-car <file>`, `--kubo`.
+**`deploy` flags:** `--register`, `--publish`, `--fail-on-publish-error`, `--config <deploy.toml>`, `--input-car <file>`, `--kubo`.
 
 ## Signer & account model
 
@@ -81,6 +83,24 @@ executable = "worker.js"
 
 Each `[text]` entry is written via `setText` after the bind. The build dir is never scanned for the config (its files get uploaded).
 
+## Browse listing (Publisher)
+
+`--publish` (or the standalone `asset-hub name publish <name>`) calls `publish(<label>)` on the env's Browse **Publisher** registry so the app shows up in Browse without users searching for its name. Take it off later with `asset-hub name unpublish <name>` — no rebuild.
+
+```sh
+# Deploy and list in Browse in one run
+dotkit deploy ./dist myapp.dot --publish
+
+# Or list/retract an already-deployed name
+dotkit asset-hub name publish myapp.dot
+dotkit asset-hub name unpublish myapp.dot
+```
+
+- **paseo-next-v2 only** — the only env with a deployed Publisher (`env.publisher`); dotkit refuses `--publish`/`publish` elsewhere.
+- **Owner-only, base labels only.** The signer must own the name NFT; dotkit pre-checks ownership and rejects subdomains (`app.`/`widget.`/`worker.`) — only base `<label>.dot` can be listed.
+- **Personhood-gated + rate-limited.** Non-owner-of-contract callers need Lite/Full personhood (`NoPersonhood` revert otherwise) and a per-day publish cap (Lite 1/day, Full 5/day). A freshly registered open-tier name whose owner has no personhood can't publish yet.
+- In `deploy`, a publish failure is **non-fatal by default** (warns, exit 0); add `--fail-on-publish-error` to hard-fail after a successful deploy.
+
 ## Diagnosing reverts
 
 dotkit surfaces the real EVM revert reason. Map it:
@@ -88,6 +108,8 @@ dotkit surfaces the real EVM revert reason. Map it:
 - `requires Lite/Full personhood, but the signer … has NoStatus` → the name is personhood-gated; use a verified signer (`sudo.personhood.dev/personhood-faucet`, env Next V2) or pick an open (long-base) name. dotkit bails here **before** committing.
 - `Name must have no digit suffix or exactly 2 digit suffix` → rename (0 or 2 trailing digits).
 - `custom error 0x14c417b5 …` echoing your H160 → not authorized (you don't own the node).
+- `cannot publish <name>: publishing to Browse needs Lite or Full personhood …` → the Publisher gates non-owner callers; verify at `sudo.personhood.dev` (env Next V2) or publish from a verified signer.
+- `cannot publish <name>: daily publish cap reached (Lite 1/day, Full 5/day); next publish allowed in ~N min …` → wait out the rolling 24h window, or use a Full-tier signer for a higher cap.
 - `no reason returned (empty revert…)` → often an unmapped account or an address with no code; run `account whoami` / `asset-hub map`.
 - `AccountUnmapped` / "balance too low" on map → fund the signer on Asset Hub (`faucet.polkadot.io/?parachain=1500`) then `asset-hub map`.
 
@@ -103,6 +125,7 @@ Deployed root must be **CIDv1 / dag-pb (or raw single-file) / sha2-256** with `i
 - **Secrets** via `$MNEMONIC` / `$DOTNS_MNEMONIC`, not `--mnemonic` in shell history.
 - **`preview` env** has placeholder addresses — `name register`, `name transfer`, and `lookup` price/tier are not wired there (registrar/registry/NFT addresses only exist for `paseo-next-v2`).
 - **Name transfer** pays the registrar's quoted friction fee (0 for same-tier/upward moves, a fee for downward moves); only the current NFT owner can transfer, and the recipient `<to>` is a `0x` H160 or SS58 address.
+- **Publisher (`--publish` / `name publish|unpublish`)** is paseo-next-v2 only, owner-only, base-label-only, and personhood-gated + rate-limited. In `deploy` it's non-fatal by default (`--fail-on-publish-error` to hard-fail).
 - **`bulletin authorize`** needs a signer that holds Bulletin **Authorizer** privileges (pass `--mnemonic`); the default storage pool cannot authorize and the chain returns `BadOrigin`.
 - **`--json`** makes every command print one JSON object to stdout (read commands like `name owner-of`/`lookup`, `bulletin verify`, `account info` are read-only and script-friendly); on failure it prints `{"error": …}` to stderr.
 - **Single blob > 2 MiB** is not yet supported (`bulletin store` bails; Kubo/native chunking keeps deploy blocks ≤256 KiB).
